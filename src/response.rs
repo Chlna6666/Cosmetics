@@ -22,7 +22,7 @@ pub struct Config {
     pub rules: Vec<Rule>,
 }
 
-#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode { AppendArray, CatalogItem, ReplaceJson }
 
@@ -136,6 +136,7 @@ pub fn overlay(
             if !file_id.eq_ignore_ascii_case(id) {
                 return Err("catalog response item ID does not match request".into());
             }
+            crate::persona::validate_local_catalog_urls(&local)?;
             serde_json::to_vec(&local).map(Some).map_err(|e| e.to_string())
         }
     }
@@ -187,7 +188,7 @@ mod tests {
         fs::create_dir_all(&folder).unwrap();
         let id = "5bba5540-377b-4ec2-9633-4551c4e82e37";
         fs::write(folder.join(format!("{id}.json")),
-            format!(r#"{{"data":{{"Item":{{"Id":"{id}","Contents":[]}}}}}}"#)).unwrap();
+            format!(r#"{{"data":{{"Item":{{"Id":"{id}","Contents":[{{"Type":"personabinary","Url":"https://cosmetics.invalid/personabinary/{id}.zip"}}]}}}}}}"#)).unwrap();
         let mut rule = append();
         rule.mode = Mode::CatalogItem;
         rule.catalog_directory = "catalog".into();

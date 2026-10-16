@@ -1,0 +1,44 @@
+name: Windows native DLL
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Rust MSVC x64
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+      - name: Unit tests
+        run: cargo test --all-targets --verbose
+      - name: Release DLL
+        run: cargo build --release --target x86_64-pc-windows-msvc --verbose
+      - name: Create distribution directory
+        shell: pwsh
+        run: |
+          $out = "dist/Cosmetics-v0.1.0-windows-x64"
+          New-Item -ItemType Directory -Force "$out/overrides/persona" | Out-Null
+          Copy-Item "target/x86_64-pc-windows-msvc/release/cosmetics.dll" "$out/Cosmetics.dll"
+          Copy-Item "cosmetics.json", "README.md", "LICENSE" "$out"
+          Copy-Item "examples/bmcbl/manifest.json" "$out/manifest.json"
+          Copy-Item "overrides/*.json" "$out/overrides"
+          Copy-Item "overrides/catalog" "$out/overrides" -Recurse
+          Copy-Item "overrides/persona/README.md" "$out/overrides/persona"
+          Compress-Archive -Path "$out" -DestinationPath "dist/Cosmetics-v0.1.0-windows-x64.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Cosmetics-v0.1.0-windows-x64
+          path: dist/Cosmetics-v0.1.0-windows-x64.zip
+          if-no-files-found: error
+          retention-days: 30

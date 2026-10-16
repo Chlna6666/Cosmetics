@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 license = "GPL-3.0-only"
-description = "Standalone Minecraft Bedrock dressing-room HTTP response overlays"
+description = "Independent Minecraft Bedrock native cosmetics HTTP overlay"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -12,6 +12,9 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+flate2 = "1"
+brotli = "8"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
 minhook-sys = "0.1.1"
