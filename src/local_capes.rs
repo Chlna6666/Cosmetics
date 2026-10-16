@@ -23,6 +23,8 @@ struct CapeManifest {
     #[serde(default)] name:String,
     #[serde(default)] author:String,
     #[serde(default)] id:Option<String>,
+    #[serde(default)] rarity:Option<String>,
+    #[serde(default,rename="startDate",alias="start_date")] start_date:Option<String>,
 }
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 pub enum AssetType { PersonaZip, Png }
@@ -196,6 +198,8 @@ struct PackCape {
     #[serde(default)] uuid: Option<String>, // Optional explicit item UUID
     #[serde(default)] texture: Option<String>,
     #[serde(default)] persona_zip: Option<String>,
+    #[serde(default)] rarity:Option<String>,
+    #[serde(default,rename="startDate",alias="start_date")] start_date:Option<String>,
 }
 fn default_pack_version()->String {"1.0.0".to_owned()}
 const MAX_CAPES_PER_PACK:usize=64;
@@ -227,6 +231,28 @@ fn safe_entry(path:&str)->bool{
         && path.split('/').all(|part|
             !part.is_empty() && part!="." && part!=".."
             && part.chars().all(|c|!c.is_control()))
+}
+/// Match Cosmos' known Persona offer rarity vocabulary; reject invalid user
+/// values rather than injecting unexpected values into the Dressing Room.
+fn normalized_rarity(value:Option<&str>)->Result<&str,String> {
+    let rarity=value.unwrap_or("common");
+    if matches!(rarity,"common"|"uncommon"|"rare"|"epic"|"legendary") {
+        Ok(rarity)
+    } else {Err(format!("unsupported cape rarity: {rarity}"))}
+}
+/// Only put an author-provided publication date into the offer. A synthetic
+/// placeholder date would not be real marketplace metadata.
+fn valid_start_date(value:&str)->bool {
+    let b=value.as_bytes();
+    if b.len()!=20 || b[4]!=b'-'||b[7]!=b'-'||b[10]!=b'T'
+        ||b[13]!=b':'||b[16]!=b':'||b[19]!=b'Z'
+        ||b.iter().enumerate().any(|(i,c)| ![4,7,10,13,16,19].contains(&i) && !c.is_ascii_digit()){
+        return false;
+    }
+    let num=|a:usize,b:usize|value[a..b].parse::<u32>().unwrap_or(0);
+    (2000..=9999).contains(&num(0,4)) && (1..=12).contains(&num(5,7))
+        && (1..=31).contains(&num(8,10)) && num(11,13)<24
+        && num(14,16)<60 && num(17,19)<60
 }
 fn stable_key(key:&str)->bool {
     !key.is_empty() && key.len()<=64 && key.bytes()
@@ -395,7 +421,8 @@ impl Registry {
                 let png=optional_file(&mut archive,texture,MAX_IMAGE)?;
                 let native=optional_file(&mut archive,persona,MAX_NATIVE)?;
                 let prepared=Self::prepare_cape(item_id,cape.name,author,png,native,
-                    &pack.version,version,true)?;
+                    &pack.version,version,true,cape.rarity.as_deref(),
+                    cape.start_date.as_deref())?;
                 for (resource,_) in &prepared.assets {
                     if !resources.insert(resource.clone()){
                         return Err("duplicate cape resource UUID".into());
@@ -437,15 +464,21 @@ impl Registry {
                 return Err("pack requires cape.png or persona.zip".into());
             }
             let entry=Self::prepare_cape(item_id,name.clone(),&author,png,native,
-                "1.0.0",[1,0,0],false)?;
+                "1.0.0",[1,0,0],false,cape_json.rarity.as_deref(),
+                cape_json.start_date.as_deref())?;
             Ok((name,vec![entry]))
         }
     }
 
     fn prepare_cape(item_id:String,name:String,author:&str,png:Option<Vec<u8>>,
-        original:Option<Vec<u8>>,version_text:&str,version:[u32;3],multi:bool)
+        original:Option<Vec<u8>>,version_text:&str,version:[u32;3],multi:bool,
+        rarity:Option<&str>,start_date:Option<&str>)
         ->Result<PreparedCape,String>{
         if !name_ok(&name)||!name_ok(author){return Err("invalid cape name or author".into());}
+        let rarity=normalized_rarity(rarity)?;
+        if start_date.is_some_and(|date|!valid_start_date(date)) {
+            return Err("startDate must be YYYY-MM-DDTHH:MM:SSZ".into());
+        }
         let decoded=png.as_ref().map(|data|validate_png(data)).transpose()?;
         let dimensions=decoded.as_ref().map(|img|img.dimensions());
         let native=original.is_some();
@@ -455,7 +488,13 @@ impl Registry {
                 return Err(format!("invalid cape UV dimensions {w}x{h}; expected 64x32, 128x64, 256x128, 512x256 or another 64x32 multiple"));
             }
         }
-        let thumbnail=decoded.as_ref().map(make_thumbnail).transpose()?;
+        // A Persona-only import can have no separate cape.png. Keep every
+        // locally generated offer image URL resolvable instead of emitting
+        // Cosmos-incompatible empty thumbnail URLs.
+        let thumbnail=match decoded.as_ref() {
+            Some(image)=>Some(make_thumbnail(image)?),
+            None=>Some(make_thumbnail(&RgbaImage::from_pixel(64,32,Rgba([76,88,105,255])))?),
+        };
         let old_resource_id=uuid_from(item_id.as_bytes(),"resource");
         let resource_id=if multi{
             // Keep item identity stable; explicit package version changes
@@ -477,19 +516,26 @@ impl Registry {
         let thumbnail_url=if thumbnail.is_some(){
             format!("https://{}{}",crate::persona::LOCAL_HOST,thumbnail_path)
         }else{String::new()};
-        let item=json!({
+        // This is the same offer schema as Cosmos CustomCapes and
+        // overrides/capes_items.json. We do not copy Cosmos linksToInfo:
+        // its PersonaCreatorPage_master_player_account!CustomCapes endpoint
+        // is not enabled in Cosmetics and would create a broken navigation.
+        let mut item=json!({
             "id":item_id,"contentType":"PersonaDurable","title":name,
             "creatorName":author,"pieceType":"persona_capes","ownership":"Purchased",
             "price":{"listPrice":0,"realmsInfo":{"inRealmsPlus":false},
                 "currencyId":"ecd19d3c-7635-402c-a185-eb11cb6c6946",
                 "virtualCurrencyType":"Minecoin"},
-            "rarity":"common","packType":"Persona",
+            "rarity":rarity,"packType":"Persona",
             "thumbnail":{"tag":"Thumbnail","type":"Thumbnail",
                 "url":thumbnail_url,"urlWithResolution":thumbnail_url},
             "images":[{"tag":"Thumbnail","type":"Thumbnail",
                 "url":thumbnail_url,"urlWithResolution":thumbnail_url}],
             "packIdentity":[{"type":"persona_piece","uuid":identity.uuid,"version":identity.version}]
         });
+        if let Some(start_date)=start_date {
+            item["startDate"]=Value::String(start_date.to_string());
+        }
         let catalog=json!({
             "code":200,"status":"OK",
             "data":{"Item":{
@@ -594,6 +640,57 @@ mod tests{
         assert_eq!(item["images"][0]["url"],item["thumbnail"]["url"]);
         assert_eq!(item["images"][0]["urlWithResolution"],item["thumbnail"]["urlWithResolution"]);
         assert_eq!(item["packIdentity"][0]["type"],"persona_piece");
+        let _=fs::remove_dir_all(root);
+    }
+    #[test] fn cosmos_custom_cape_offer_and_catalog_have_matching_identities() {
+        let root=std::env::temp_dir().join(format!("cosmetics_cosmos_shape_{}",std::process::id()));
+        let _=fs::remove_dir_all(&root);
+        pack_zip(&root,"cosmos.zip",Some(r#"{"name":"Sample Cape","author":"Artist",
+            "rarity":"legendary","startDate":"2026-10-17T10:20:30Z"}"#));
+        let reg=Registry::scan(&root);
+        assert_eq!(reg.items.len(),1,"{:?}",reg.diagnostics);
+        let item=&reg.items[0];
+        for field in ["id","contentType","title","creatorName","thumbnail","price",
+            "pieceType","rarity","ownership","packType","packIdentity","images","startDate"] {
+            assert!(item.get(field).is_some(),"missing Cosmos offer field {field}");
+        }
+        assert_eq!(item["contentType"],"PersonaDurable");
+        assert_eq!(item["pieceType"],"persona_capes");
+        assert_eq!(item["rarity"],"legendary");
+        assert_eq!(item["startDate"],"2026-10-17T10:20:30Z");
+        assert_eq!(item["thumbnail"]["url"],item["images"][0]["url"]);
+        assert!(!item["thumbnail"]["url"].as_str().unwrap().is_empty());
+        assert!(item.get("linksToInfo").is_none(),"unhandled Cosmos detail page must not be linked");
+        let id=item["id"].as_str().unwrap();
+        let catalog:Value=serde_json::from_slice(reg.catalogs.get(id).unwrap()).unwrap();
+        let published=&catalog["data"]["Item"];
+        assert_eq!(catalog["code"],200);
+        assert_eq!(published["Id"],id);
+        assert_eq!(published["DisplayProperties"]["packIdentity"],item["packIdentity"]);
+        assert_eq!(published["DisplayProperties"]["creatorName"],item["creatorName"]);
+        assert_eq!(published["Contents"][0]["Type"],"personabinary");
+        assert_eq!(published["Contents"][0]["MinClientVersion"],"1.16.0");
+        assert_eq!(published["Contents"][0]["MaxClientVersion"],"65535.65535.65535");
+        let url=published["Contents"][0]["Url"].as_str().unwrap();
+        assert!(url.starts_with("https://cosmetics.invalid/personabinary/"));
+        assert!(reg.assets.contains_key(url.strip_prefix("https://cosmetics.invalid").unwrap()));
+        let thumbnail_url=item["thumbnail"]["url"].as_str().unwrap();
+        assert!(reg.assets.contains_key(thumbnail_url.strip_prefix("https://cosmetics.invalid").unwrap()));
+        let _=fs::remove_dir_all(root);
+    }
+    #[test] fn invalid_cosmos_offer_metadata_fails_before_registration() {
+        let root=std::env::temp_dir().join(format!("cosmetics_bad_offer_{}",std::process::id()));
+        let _=fs::remove_dir_all(&root);
+        pack_zip(&root,"invalid.zip",Some(r#"{"rarity":"invalid"}"#));
+        let reg=Registry::scan(&root);
+        assert_eq!(reg.rejected,1);
+        assert!(reg.items.is_empty());
+        assert!(reg.diagnostics.iter().any(|line|line.contains("unsupported cape rarity")));
+        pack_zip(&root,"invalid.zip",Some(r#"{"startDate":"untrusted"}"#));
+        let reg=Registry::scan(&root);
+        assert_eq!(reg.rejected,1);
+        assert!(reg.items.is_empty());
+        assert!(reg.diagnostics.iter().any(|line|line.contains("startDate must be")));
         let _=fs::remove_dir_all(root);
     }
     #[test] fn original_native_module_identity_is_used_in_catalog_and_wardrobe() {

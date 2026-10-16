@@ -250,3 +250,12 @@ Cosmetics 读取 `capes/*.zip` 时，外层 ZIP 只需包含 `cape.png` 和可�
 PNG-only 路径会自动生成带有 `manifest.json`、明文 `contents.json`、`textures/cape.png` 以及语言文件的内部 ZIP。此 ZIP **不是** Marketplace 的 `personabinary` 资源：它缺少真实 Persona 的 `*.meta.json`，也没有 Marketplace 签名。文件齐全并不能证明客户端接受它，尤其不能通过给 PNG 或 ZIP 任意加密来获得有效资源。正式使用应优先提供与相应披风一致、可用的原生 `persona.zip`，通过外层包的 `persona.zip` 字段透传，不对原始二进制进行转换。
 
 当前 WinHTTP 虚拟资源同时支持纯路径与带查询参数的路径；`LOCAL_ASSET_REQUEST`、`LOCAL_ASSET_RESPONSE_READY`、`client_read_complete` 只表示网络拦截阶段，而不代表 Persona 已解析或披风已装备。如果点击时完全没有 `LOCAL_ASSET_REQUEST`，应排查 Minecraft 是否绕过 WinHTTP 使用其他网络栈，不能误报为 ZIP 校验或解密失败。
+
+
+### Cosmos CustomCapes 商品列表字段
+
+本地披风商品与 `Persona/CustomCapes/*.json` 及 `overrides/capes_items.json` 使用同一套 PersonaDurable 商品字段。自动合成商品信息并通过 `dressing_room_capes` 注入现有 `My Local ZIP Capes` 分类；无需将运行时本地披风再写入固定的 `overrides/capes_items.json`（避免多次启动时出现重复 ID）。
+
+单披风 `cape.json` 或多披风 `pack.json.capes[]` 可以额外声明 `rarity`（common、uncommon、rare、epic、legendary）以及真实的 `startDate`（格式 `YYYY-MM-DDTHH:MM:SSZ`），缺省时不伪造发布日期。商品与 GetPublishedItem 的 `Id`、`packIdentity` 完全一致。对于仅含原生 `persona.zip` 而没有单独贴图的条目，会生成一个可响应的占位缩略图，避免空资源 URL。
+
+Cosmos 的 `linksToInfo`、`namedLinksToInfoMap` 指向专门的 CustomCapes Persona 页面。Cosmetics 默认关闭该页面路由，因此不能简单复制这个链接，否则会造成新的无效导航。当前仍允许在更衣室通过 `personaOfferInteractionComp` 交互。列表元数据完善并不等于游戏已接受或装备实验性 PNG-only Persona ZIP；那还要求内部 Persona 资源被客户端真正解析。
