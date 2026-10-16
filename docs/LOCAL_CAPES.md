@@ -241,3 +241,12 @@ Cosmetics 启动时输出版本、作者 Chlna6666、GPL-3.0-only、
 HTTP 状态文本和 HTTP 版本查询。之前这些查询可能访问没有任何网络
 响应的原始句柄，导致错误或等待。注意即便 WinHTTP 下载完整，
 PNG-only 生成的明文 Persona ZIP 仍未被证实可在游戏里装备。
+
+
+### Native Persona 与明文试验包的边界（26.40）
+
+Cosmetics 读取 `capes/*.zip` 时，外层 ZIP 只需包含 `cape.png` 和可选 `cape.json`；这些文件不是 Minecraft 可直接加载的 Persona 包。
+
+PNG-only 路径会自动生成带有 `manifest.json`、明文 `contents.json`、`textures/cape.png` 以及语言文件的内部 ZIP。此 ZIP **不是** Marketplace 的 `personabinary` 资源：它缺少真实 Persona 的 `*.meta.json`，也没有 Marketplace 签名。文件齐全并不能证明客户端接受它，尤其不能通过给 PNG 或 ZIP 任意加密来获得有效资源。正式使用应优先提供与相应披风一致、可用的原生 `persona.zip`，通过外层包的 `persona.zip` 字段透传，不对原始二进制进行转换。
+
+当前 WinHTTP 虚拟资源同时支持纯路径与带查询参数的路径；`LOCAL_ASSET_REQUEST`、`LOCAL_ASSET_RESPONSE_READY`、`client_read_complete` 只表示网络拦截阶段，而不代表 Persona 已解析或披风已装备。如果点击时完全没有 `LOCAL_ASSET_REQUEST`，应排查 Minecraft 是否绕过 WinHTTP 使用其他网络栈，不能误报为 ZIP 校验或解密失败。

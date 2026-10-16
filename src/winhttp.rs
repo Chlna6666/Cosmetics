@@ -399,7 +399,7 @@ unsafe extern "system" fn on_open_request(
                 else {"unknown_asset"};
             logger(&format!("request #{id}: LOCAL_ASSET_REQUEST type={asset_kind} method={} async={async_session} uri=https://{}{}",
                 debug::redact_route_method(&method_for_diagnostics),
-                persona::LOCAL_HOST,path_for_diagnostics));
+                persona::LOCAL_HOST,path_for_diagnostics.split(['?','#']).next().unwrap_or("")));
         }
         if let Some(name)=diagnostic_route {
             logger(&format!("request #{id}: route matched {name}; async={async_session}"));
@@ -594,7 +594,10 @@ unsafe extern "system" fn on_send(
                 bytes.len(),persona::LOCAL_HOST,path));
             (bytes.to_vec(),200)
         } else {
-            let loaded=RUNTIME.get().map(|runtime|persona::load(&runtime.root,&path));
+            // The virtual URL may carry a cache-busting query. Match only
+            // the path component, never allow the query into a file lookup.
+            let canonical=local_capes::canonical_asset_path(&path);
+            let loaded=RUNTIME.get().map(|runtime|persona::load(&runtime.root,canonical));
             match loaded {
                 Some(Ok(Some(resource)))=>{
                     logger(&format!("legacy Persona ZIP found: {} ({} bytes)",resource.resource_uuid,resource.bytes.len()));

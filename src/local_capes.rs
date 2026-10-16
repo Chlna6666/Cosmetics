@@ -59,8 +59,13 @@ pub fn items()->&'static [Value] {REGISTRY.get().map_or(&[],|r|r.items.as_slice(
 pub fn catalog(id:&str)->Option<&'static [u8]>{
     REGISTRY.get()?.catalogs.get(&id.to_ascii_lowercase()).map(Vec::as_slice)
 }
+/// Resolve only registered resources. WinHTTP request targets can carry
+/// cache-busting or image-resize query parameters that are not part of the key.
+pub fn canonical_asset_path(path:&str)->&str {
+    path.split(['?','#']).next().unwrap_or(path)
+}
 pub fn asset(path:&str)->Option<(&'static [u8],AssetType)> {
-    let a=REGISTRY.get()?.assets.get(path)?;
+    let a=REGISTRY.get()?.assets.get(canonical_asset_path(path))?;
     Some((a.data.as_slice(),a.kind))
 }
 fn validate_png(bytes:&[u8])->Result<RgbaImage,String>{
@@ -146,18 +151,23 @@ fn experimental_persona_png(name:&str,pack_uuid:&str,module_uuid:&str,png:&[u8],
     // This is a plaintext, *experimental* Persona resource payload, not a
     // verified Minecraft Marketplace personabinary file or signed package.
     let manifest=json!({
-        "format_version":2,
-        "header":{"name":name,"description":"Cosmetics local plaintext cape experiment",
+        "format_version":1,
+        "header":{"name":"pack.name","description":"pack.description",
                   "uuid":pack_uuid,"version":version,"min_engine_version":[1,16,0]},
         "modules":[{"type":"persona_piece","uuid":module_uuid,"version":version}]
     });
-    let files=json!({"content":[{"path":"manifest.json"},{"path":"textures/cape.png"},{"path":"contents.json"}]});
+    // Bedrock's plaintext contents.json lists the files within the pack;
+    // it does not turn a PNG into the proprietary Persona .meta.json payload.
+    let files=json!({"content":[{"path":"manifest.json"},{"path":"textures/cape.png"},
+        {"path":"texts/en_US.lang"},{"path":"texts/languages.json"},{"path":"contents.json"}]});
     let mut writer=ZipWriter::new(Cursor::new(Vec::new()));
     let options=SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     for (path,data) in [
         ("manifest.json",serde_json::to_vec(&manifest).map_err(|e|e.to_string())?),
         ("contents.json",serde_json::to_vec(&files).map_err(|e|e.to_string())?),
-        ("textures/cape.png",png.to_vec())
+        ("textures/cape.png",png.to_vec()),
+        ("texts/en_US.lang",format!("pack.name={}\npack.description=Cosmetics local cape\n",name.replace('\r'," ").replace('\n'," ")).into_bytes()),
+        ("texts/languages.json",br#"["en_US"]"#.to_vec())
     ] {
         writer.start_file(path,options).map_err(|e|e.to_string())?;
         writer.write_all(&data).map_err(|e|e.to_string())?;
@@ -304,8 +314,9 @@ impl Registry {
                         let size=entry.dimensions.map_or("none".to_string(),|(w,h)|
                             format!("{w}x{h} scale={}x",w/64));
                         reg.diagnostics.push(format!(
-                            "CAPE_REGISTERED {label} index={} texture={} payload={} game_accepted=UNVERIFIED",
-                            index+1,size,if entry.native{"native_persona"}else{"experimental_plaintext"}));
+                            "CAPE_REGISTERED {label} index={} texture={} payload={} game_accepted=UNVERIFIED{}",
+                            index+1,size,if entry.native{"native_persona"}else{"experimental_plaintext"},
+                            if entry.native {""} else {" missing_proprietary_persona_meta=true"}));
                         item_ids.insert(entry.id.clone());
                         reg.catalogs.insert(entry.id,entry.catalog);
                         for (path,asset) in entry.assets {
@@ -475,6 +486,8 @@ impl Registry {
             "rarity":"common","packType":"Persona",
             "thumbnail":{"tag":"Thumbnail","type":"Thumbnail",
                 "url":thumbnail_url,"urlWithResolution":thumbnail_url},
+            "images":[{"tag":"Thumbnail","type":"Thumbnail",
+                "url":thumbnail_url,"urlWithResolution":thumbnail_url}],
             "packIdentity":[{"type":"persona_piece","uuid":identity.uuid,"version":identity.version}]
         });
         let catalog=json!({
@@ -509,6 +522,12 @@ mod tests{
         out.into_inner()
     }
 
+    #[test] fn asset_urls_accept_query_without_widening_resource_lookup() {
+        assert_eq!(canonical_asset_path("/personabinary/a.zip?version=5"),"/personabinary/a.zip");
+        assert_eq!(canonical_asset_path("/thumbnails/b.png?width=800&height=450"),"/thumbnails/b.png");
+        assert_eq!(canonical_asset_path("/personabinary/a.zip#section"),"/personabinary/a.zip");
+        assert_eq!(canonical_asset_path("/personabinary/a.zip"),"/personabinary/a.zip");
+    }
     fn pack_zip(root:&Path,name:&str,manifest:Option<&str>) {
         fs::create_dir_all(root.join("capes")).unwrap();
         let file=File::create(root.join("capes").join(name)).unwrap();
@@ -549,6 +568,33 @@ mod tests{
         assert_eq!(manifest["header"]["uuid"],reg.items[0]["packIdentity"][0]["uuid"]);
         assert_ne!(manifest["modules"][0]["uuid"],manifest["header"]["uuid"]);
         let _=fs::remove_dir_all(&root);
+    }
+    #[test] fn plaintext_persona_has_version_one_manifest_and_complete_file_index() {
+        let data=experimental_persona_png("Local Test","11111111-2222-4333-8444-555555555555",
+            "66666666-2222-4333-8444-555555555555",&dummy_png(),[1,0,0]).unwrap();
+        let mut archive=ZipArchive::new(Cursor::new(data)).unwrap();
+        let manifest:Value=serde_json::from_reader(archive.by_name("manifest.json").unwrap()).unwrap();
+        assert_eq!(manifest["format_version"],1);
+        let index:Value=serde_json::from_reader(archive.by_name("contents.json").unwrap()).unwrap();
+        let names:Vec<String>=index["content"].as_array().unwrap().iter()
+            .map(|entry|entry["path"].as_str().unwrap().to_owned()).collect();
+        for name in &names { assert!(archive.by_name(name).is_ok(),"missing {name}"); }
+        assert!(names.contains(&"textures/cape.png".to_string()));
+        assert!(names.contains(&"texts/languages.json".to_string()));
+        // Not a signed Persona package: presence of a manifest alone cannot
+        // establish that Minecraft has loaded or equipped this cape.
+        assert!(archive.by_name("signatures.json").is_err());
+    }
+    #[test] fn local_item_metadata_keeps_cosmos_thumbnail_fields() {
+        let root=std::env::temp_dir().join(format!("cosmetics_thumbs_{}",std::process::id()));
+        let _=fs::remove_dir_all(&root);
+        pack_zip(&root,"cape.zip",None);
+        let reg=Registry::scan(&root);
+        let item=&reg.items[0];
+        assert_eq!(item["images"][0]["url"],item["thumbnail"]["url"]);
+        assert_eq!(item["images"][0]["urlWithResolution"],item["thumbnail"]["urlWithResolution"]);
+        assert_eq!(item["packIdentity"][0]["type"],"persona_piece");
+        let _=fs::remove_dir_all(root);
     }
     #[test] fn original_native_module_identity_is_used_in_catalog_and_wardrobe() {
         let root=std::env::temp_dir().join(format!("cosmetics_native_{}",std::process::id()));
