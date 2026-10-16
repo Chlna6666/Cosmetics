@@ -142,14 +142,14 @@ fn validate_native(bytes:&[u8])->Result<NativeIdentity,String>{
     };
     Ok(NativeIdentity{uuid,version})
 }
-fn experimental_persona_png(name:&str,pack_uuid:&str,module_uuid:&str,png:&[u8])->Result<Vec<u8>,String>{
+fn experimental_persona_png(name:&str,pack_uuid:&str,module_uuid:&str,png:&[u8],version:[u32;3])->Result<Vec<u8>,String>{
     // This is a plaintext, *experimental* Persona resource payload, not a
     // verified Minecraft Marketplace personabinary file or signed package.
     let manifest=json!({
         "format_version":2,
         "header":{"name":name,"description":"Cosmetics local plaintext cape experiment",
-                  "uuid":pack_uuid,"version":[1,0,0],"min_engine_version":[1,16,0]},
-        "modules":[{"type":"persona_piece","uuid":module_uuid,"version":[1,0,0]}]
+                  "uuid":pack_uuid,"version":version,"min_engine_version":[1,16,0]},
+        "modules":[{"type":"persona_piece","uuid":module_uuid,"version":version}]
     });
     let files=json!({"content":[{"path":"manifest.json"},{"path":"textures/cape.png"},{"path":"contents.json"}]});
     let mut writer=ZipWriter::new(Cursor::new(Vec::new()));
@@ -167,6 +167,92 @@ fn experimental_persona_png(name:&str,pack_uuid:&str,module_uuid:&str,png:&[u8])
 fn name_ok(input:&str)->bool{
     !input.is_empty() && input.chars().count()<=90 && !input.chars().any(char::is_control)
 }
+// Format v1 multi-cape archives declare a persistent package UUID, a stable
+// per-cape key, and a version. No UUID is randomly generated at runtime.
+#[derive(Deserialize)]
+struct PackManifest {
+    format_version: u32,
+    id: String,
+    name: String,
+    #[serde(default)] author: String,
+    #[serde(default = "default_pack_version")] version: String,
+    capes: Vec<PackCape>,
+}
+#[derive(Deserialize)]
+struct PackCape {
+    id: String, // Stable key inside the package; not a random UUID
+    name: String,
+    #[serde(default)] author: Option<String>,
+    #[serde(default)] uuid: Option<String>, // Optional explicit item UUID
+    #[serde(default)] texture: Option<String>,
+    #[serde(default)] persona_zip: Option<String>,
+}
+fn default_pack_version()->String {"1.0.0".to_owned()}
+const MAX_CAPES_PER_PACK:usize=64;
+const MAX_CAPES:usize=512;
+struct PreparedCape {
+    id:String,
+    item:Value,
+    catalog:Vec<u8>,
+    assets:Vec<(String,LocalAsset)>,
+    native:bool,
+}
+fn version_parts(version:&str)->Result<[u32;3],String>{
+    let parts:Vec<_>=version.split('.').collect();
+    if parts.len()!=3 || parts.iter().any(|x|x.is_empty()
+        ||x.len()>5||!x.bytes().all(|b|b.is_ascii_digit())) {
+        return Err("version must be major.minor.patch with numeric parts".into());
+    }
+    let mut result=[0u32;3];
+    for (i,part) in parts.into_iter().enumerate(){
+        result[i]=part.parse().map_err(|_|"invalid version number")?;
+        if result[i]>65535{return Err("version parts must not exceed 65535".into());}
+    }
+    Ok(result)
+}
+fn safe_entry(path:&str)->bool{
+    !path.is_empty() && path.len()<=192 && !path.starts_with('/')
+        && !path.contains('\\') && !path.contains(':')
+        && path.split('/').all(|part|
+            !part.is_empty() && part!="." && part!=".."
+            && part.chars().all(|c|!c.is_control()))
+}
+fn stable_key(key:&str)->bool {
+    !key.is_empty() && key.len()<=64 && key.bytes()
+        .all(|b|b.is_ascii_alphanumeric()||b"_-.".contains(&b))
+}
+fn optional_file(zip:&mut ZipArchive<File>,name:Option<&str>,max:usize)
+    ->Result<Option<Vec<u8>>,String>{
+    let Some(name)=name else{return Ok(None)};
+    if !safe_entry(name) {return Err(format!("invalid ZIP member path: {name}"));}
+    let mut item=zip.by_name(name).map_err(|e|format!("ZIP member {name} missing: {e}"))?;
+    if item.size()==0 || item.size()>max as u64{
+        return Err(format!("ZIP member {name} has invalid size"));
+    }
+    let mut bytes=Vec::new();
+    item.by_ref().take(max as u64+1).read_to_end(&mut bytes)
+        .map_err(|e|format!("ZIP member {name} read failed: {e}"))?;
+    if bytes.len()>max{return Err(format!("ZIP member {name} too large"));}
+    Ok(Some(bytes))
+}
+fn optional_file_or_missing(zip:&mut ZipArchive<File>,name:&str,max:usize)
+    ->Result<Option<Vec<u8>>,String>{
+    if !safe_entry(name){return Err("invalid member path".into());}
+    match zip.by_name(name){
+        Ok(mut item)=>{
+            if item.size()==0 || item.size()>max as u64{
+                return Err(format!("ZIP member {name} has invalid size"));
+            }
+            let mut bytes=Vec::new();
+            item.by_ref().take(max as u64+1).read_to_end(&mut bytes)
+                .map_err(|e|e.to_string())?;
+            if bytes.len()>max{return Err(format!("{name} too large"));}
+            Ok(Some(bytes))
+        }
+        Err(zip::result::ZipError::FileNotFound)=>Ok(None),
+        Err(e)=>Err(e.to_string())
+    }
+}
 impl Registry {
     pub fn scan(root:&Path)->Self {
         let mut reg=Self::default();
@@ -177,27 +263,56 @@ impl Registry {
         }
         let mut paths=match fs::read_dir(&dir){
             Ok(iter)=>iter.flatten().map(|x|x.path()).filter(|p|
-                p.extension().and_then(|x|x.to_str()).is_some_and(|x|x.eq_ignore_ascii_case("zip"))).collect::<Vec<_>>(),
+                p.extension().and_then(|x|x.to_str())
+                    .is_some_and(|x|x.eq_ignore_ascii_case("zip"))).collect::<Vec<_>>(),
             Err(e)=>{
-                reg.diagnostics.push(format!("cannot scan capes directory: {e}"));return reg
+                reg.diagnostics.push(format!("cannot scan capes directory: {e}"));
+                return reg
             }
         };
         paths.sort();
         reg.discovered_zip=paths.len();
         let skipped=paths.len().saturating_sub(MAX_PACKS);
-        if skipped>0 {
+        if skipped>0{
             reg.diagnostics.push(format!("{skipped} extra ZIP files skipped (limit={MAX_PACKS})"));
         }
-        let mut reserved=HashSet::new();
+        let mut item_ids=HashSet::new();
+        let mut asset_ids=HashSet::new();
         let mut total=0usize;
         for path in paths.into_iter().take(MAX_PACKS){
-            let label=path.file_name().and_then(|x|x.to_str()).unwrap_or("<invalid>").to_owned();
-            match Self::read_one(&path,&mut reg,&mut reserved,&mut total){
-                Ok((name,native))=>{
+            let label=path.file_name().and_then(|x|x.to_str())
+                .unwrap_or("<invalid>").to_owned();
+            let result=Self::read_pack(&path);
+            match result {
+                Ok((name,entries))=>{
+                    let items=entries.len();
+                    let bytes=entries.iter().flat_map(|entry|entry.assets.iter())
+                        .try_fold(0usize,|acc,(_,asset)|acc.checked_add(asset.data.len()))
+                        .unwrap_or(usize::MAX);
+                    let duplicate=entries.iter().any(|entry|item_ids.contains(&entry.id)
+                        ||entry.assets.iter().any(|(path,_)|asset_ids.contains(path)));
+                    if duplicate || items>MAX_CAPES.saturating_sub(reg.items.len())
+                        ||bytes>MAX_TOTAL_BYTES.saturating_sub(total){
+                        reg.rejected+=1;
+                        reg.diagnostics.push(format!(
+                            "ZIP_REJECTED {label}: duplicate UUID/resource, too many capes or memory limit"));
+                        continue;
+                    }
+                    total+=bytes;
+                    for entry in entries {
+                        item_ids.insert(entry.id.clone());
+                        reg.catalogs.insert(entry.id,entry.catalog);
+                        for (path,asset) in entry.assets {
+                            asset_ids.insert(path.clone());
+                            reg.assets.insert(path,asset);
+                        }
+                        if entry.native{reg.native_payloads+=1}
+                        else{reg.plaintext_experimental_payloads+=1}
+                        reg.items.push(entry.item);
+                    }
                     reg.accepted+=1;
-                    if native {reg.native_payloads+=1;}else{reg.plaintext_experimental_payloads+=1;}
-                    reg.diagnostics.push(format!("ZIP_VALIDATED {label}: {name} payload={}",
-                        if native {"native_persona"}else{"experimental_plaintext_png"}));
+                    reg.diagnostics.push(format!(
+                        "ZIP_VALIDATED {label}: {name} capes={items} identity=stable payloads=registered"));
                 }
                 Err(err)=>{
                     reg.rejected+=1;
@@ -207,120 +322,168 @@ impl Registry {
         }
         reg
     }
-    fn read_one(path:&Path,reg:&mut Registry,reserved:&mut HashSet<String>,total:&mut usize)->Result<(String,bool),String>{
+
+    fn read_pack(path:&Path)->Result<(String,Vec<PreparedCape>),String>{
         let metadata=fs::metadata(path).map_err(|e|e.to_string())?;
-        if metadata.len()==0||metadata.len()>MAX_PACK_FILE{return Err("pack size exceeds 64MiB".into());}
-        let mut zip=ZipArchive::new(File::open(path).map_err(|e|e.to_string())?)
+        if metadata.len()==0||metadata.len()>MAX_PACK_FILE{
+            return Err("pack size exceeds 64MiB".into());
+        }
+        let mut archive=ZipArchive::new(File::open(path).map_err(|e|e.to_string())?)
             .map_err(|e|format!("invalid outer ZIP: {e}"))?;
-        if zip.len()>64{return Err("too many ZIP entries".into());}
-        let cape_json=match zip.by_name("cape.json"){
+        if archive.len()>256{return Err("too many ZIP members".into());}
+        let pack_bytes=match archive.by_name("pack.json"){
             Ok(mut file)=>{
-                if file.size()>MAX_MANIFEST as u64{return Err("cape.json too large".into());}
+                if file.size()>MAX_MANIFEST as u64 {return Err("pack.json too large".into());}
                 let mut bytes=Vec::new();
                 file.by_ref().take(MAX_MANIFEST as u64+1).read_to_end(&mut bytes)
                     .map_err(|e|e.to_string())?;
-                serde_json::from_slice::<CapeManifest>(&bytes)
-                    .map_err(|e|format!("invalid cape.json: {e}"))?
+                Some(bytes)
             }
-            Err(zip::result::ZipError::FileNotFound)=>CapeManifest::default(),
+            Err(zip::result::ZipError::FileNotFound)=>None,
             Err(e)=>return Err(e.to_string())
         };
-        let name=if cape_json.name.is_empty(){
-            path.file_stem().and_then(|s|s.to_str()).unwrap_or("Local Cape").to_string()
-        }else{cape_json.name};
-        let author=if cape_json.author.is_empty(){"Player".to_string()}else{cape_json.author};
-        if !name_ok(&name)||!name_ok(&author){return Err("invalid name or author".into());}
-        let seed=format!("{}\0{}\0{}",path.file_stem().and_then(|s|s.to_str()).unwrap_or("cape"),name,author);
-        let id=match cape_json.id{
-            Some(id) if valid_uuid(&id)=>id.to_ascii_lowercase(),
-            Some(_)=>return Err("cape.json id must be a UUID".into()),
-            None=>uuid_from(seed.as_bytes(),"item")
-        };
-        let resource_id=uuid_from(id.as_bytes(),"resource");
-        let generated_pack_uuid=uuid_from(id.as_bytes(),"pack");
-        if !reserved.insert(id.clone()){return Err("duplicate local cape ID".into());}
-        let png=match zip.by_name("cape.png"){
-            Ok(mut file)=>{
-                if file.size()>MAX_IMAGE as u64{return Err("cape.png exceeds 8MiB".into());}
-                let mut data=Vec::new();
-                file.by_ref().take(MAX_IMAGE as u64+1).read_to_end(&mut data).map_err(|e|e.to_string())?;
-                let img=validate_png(&data)?;
-                Some((data,img))
+        if let Some(bytes)=pack_bytes {
+            let pack:PackManifest=serde_json::from_slice(&bytes)
+                .map_err(|e|format!("pack.json invalid: {e}"))?;
+            if pack.format_version!=1{return Err("unsupported pack.json format_version".into());}
+            if !valid_uuid(&pack.id){return Err("pack.json id must be a fixed UUID".into());}
+            if !name_ok(&pack.name){return Err("invalid package name".into());}
+            if pack.capes.is_empty()||pack.capes.len()>MAX_CAPES_PER_PACK {
+                return Err("multi-cape pack must contain 1..64 capes".into());
             }
-            Err(zip::result::ZipError::FileNotFound)=>None,
-            Err(e)=>return Err(e.to_string()),
-        };
-        let original=match zip.by_name("persona.zip"){
-            Ok(mut file)=>{
-                if file.size()>MAX_NATIVE as u64{return Err("persona.zip exceeds 64MiB".into());}
-                let mut data=Vec::new();
-                file.by_ref().take(MAX_NATIVE as u64+1).read_to_end(&mut data).map_err(|e|e.to_string())?;
-                let native=validate_native(&data)?;
-                Some((data,native))
+            let version=version_parts(&pack.version)?;
+            let author=if pack.author.is_empty(){"Player"}else{pack.author.as_str()};
+            if !name_ok(author){return Err("invalid package author".into());}
+            let mut keys=HashSet::new();
+            let mut ids=HashSet::new();
+            let mut resources=HashSet::new();
+            let mut entries=Vec::with_capacity(pack.capes.len());
+            for cape in pack.capes {
+                if !stable_key(&cape.id) || !keys.insert(cape.id.clone()) {
+                    return Err("duplicate or invalid stable cape key".into());
+                }
+                let item_id=match cape.uuid {
+                    Some(id) if valid_uuid(&id)=>id.to_ascii_lowercase(),
+                    Some(_)=>return Err("cape uuid must be UUID".into()),
+                    None=>uuid_from(
+                        format!("{}\0{}",pack.id.to_ascii_lowercase(),cape.id).as_bytes(),"item-v2"),
+                };
+                if !ids.insert(item_id.clone()){return Err("duplicate cape item UUID".into());}
+                let author=cape.author.as_deref().filter(|v|!v.is_empty()).unwrap_or(author);
+                let texture=cape.texture.as_deref();
+                let persona=cape.persona_zip.as_deref();
+                if texture.is_none() && persona.is_none(){
+                    return Err(format!("cape {} missing texture or persona_zip",cape.id));
+                }
+                let png=optional_file(&mut archive,texture,MAX_IMAGE)?;
+                let native=optional_file(&mut archive,persona,MAX_NATIVE)?;
+                let prepared=Self::prepare_cape(item_id,cape.name,author,png,native,
+                    &pack.version,version,true)?;
+                for (resource,_) in &prepared.assets {
+                    if !resources.insert(resource.clone()){
+                        return Err("duplicate cape resource UUID".into());
+                    }
+                }
+                entries.push(prepared);
             }
-            Err(zip::result::ZipError::FileNotFound)=>None,
-            Err(e)=>return Err(e.to_string()),
-        };
-        if png.is_none()&&original.is_none(){return Err("pack requires cape.png or persona.zip".into());}
-        let is_native=original.is_some();
-        let identity=original.as_ref().map(|(_,identity)|identity.clone())
-            .unwrap_or(NativeIdentity{uuid:generated_pack_uuid.clone(),version:"1.0.0".to_string()});
-        let persona=match original{
-            Some((payload,_))=>payload,
-            None=>experimental_persona_png(&name,&generated_pack_uuid,&resource_id,&png.as_ref().unwrap().0)?
-        };
-        let thumb=png.map(|(_png,img)| {
-            let path=format!("/thumbnails/{resource_id}.png");
-            make_thumbnail(&img).map(|bytes|(path,bytes))
-        }).transpose()?;
-        let required=persona.len()+thumb.as_ref().map_or(0,|(_,bytes)|bytes.len());
-        if required>MAX_TOTAL_BYTES.saturating_sub(*total){
-            return Err("total in-memory local cape budget exceeded".into());
+            Ok((pack.name,entries))
+        }else{
+            // Backward compatible: existing single-cape archives retain their
+            // exact previous item/resource identities across an upgrade.
+            let cape_json=match archive.by_name("cape.json"){
+                Ok(mut f)=>{
+                    if f.size()>MAX_MANIFEST as u64{return Err("cape.json too large".into());}
+                    let mut bytes=Vec::new();
+                    f.by_ref().take(MAX_MANIFEST as u64+1).read_to_end(&mut bytes)
+                        .map_err(|e|e.to_string())?;
+                    serde_json::from_slice::<CapeManifest>(&bytes)
+                        .map_err(|e|format!("invalid cape.json: {e}"))?
+                }
+                Err(zip::result::ZipError::FileNotFound)=>CapeManifest::default(),
+                Err(e)=>return Err(e.to_string())
+            };
+            let name=if cape_json.name.is_empty(){
+                path.file_stem().and_then(|s|s.to_str()).unwrap_or("Local Cape").to_owned()
+            }else{cape_json.name};
+            let author=if cape_json.author.is_empty(){"Player".to_owned()}else{cape_json.author};
+            if !name_ok(&name)||!name_ok(&author){return Err("invalid name or author".into());}
+            let legacy_seed=format!("{}\0{}\0{}",
+                path.file_stem().and_then(|s|s.to_str()).unwrap_or("cape"),name,author);
+            let item_id=match cape_json.id {
+                Some(id) if valid_uuid(&id)=>id.to_ascii_lowercase(),
+                Some(_)=>return Err("cape.json id must be UUID".into()),
+                None=>uuid_from(legacy_seed.as_bytes(),"item")
+            };
+            let png=optional_file_or_missing(&mut archive,"cape.png",MAX_IMAGE)?;
+            let native=optional_file_or_missing(&mut archive,"persona.zip",MAX_NATIVE)?;
+            if png.is_none()&&native.is_none(){
+                return Err("pack requires cape.png or persona.zip".into());
+            }
+            let entry=Self::prepare_cape(item_id,name.clone(),&author,png,native,
+                "1.0.0",[1,0,0],false)?;
+            Ok((name,vec![entry]))
         }
-        *total+=required;
+    }
+
+    fn prepare_cape(item_id:String,name:String,author:&str,png:Option<Vec<u8>>,
+        original:Option<Vec<u8>>,version_text:&str,version:[u32;3],multi:bool)
+        ->Result<PreparedCape,String>{
+        if !name_ok(&name)||!name_ok(author){return Err("invalid cape name or author".into());}
+        let thumbnail=png.as_ref().map(|data|
+            validate_png(data).and_then(|image|make_thumbnail(&image))).transpose()?;
+        let native=original.is_some();
+        let old_resource_id=uuid_from(item_id.as_bytes(),"resource");
+        let resource_id=if multi{
+            // Keep item identity stable; explicit package version changes
+            // produce a new URL to avoid stale HTTP resource caches.
+            uuid_from(format!("{item_id}\0{version_text}").as_bytes(),"content-v2")
+        }else{old_resource_id.clone()};
+        let generated_pack_uuid=uuid_from(item_id.as_bytes(),"pack");
+        let identity=original.as_deref().map(validate_native).transpose()?
+            .unwrap_or(NativeIdentity{
+                uuid:generated_pack_uuid.clone(),version:version_text.to_owned()
+            });
+        let persona=match original {
+            Some(data)=>data,
+            None=>experimental_persona_png(&name,&generated_pack_uuid,
+                &old_resource_id,&png.ok_or("missing cape PNG")?,version)?
+        };
         let url=format!("https://{}/personabinary/{resource_id}.zip",crate::persona::LOCAL_HOST);
-        let thumbnail=thumb.as_ref().map(|(path,_)|
-            format!("https://{}{}",crate::persona::LOCAL_HOST,path))
-            .unwrap_or_default();
+        let thumbnail_path=format!("/thumbnails/{resource_id}.png");
+        let thumbnail_url=if thumbnail.is_some(){
+            format!("https://{}{}",crate::persona::LOCAL_HOST,thumbnail_path)
+        }else{String::new()};
         let item=json!({
-            "id":id,
-            "contentType":"PersonaDurable",
-            "title":name,
-            "creatorName":author,
-            "pieceType":"persona_capes",
-            "ownership":"Purchased",
+            "id":item_id,"contentType":"PersonaDurable","title":name,
+            "creatorName":author,"pieceType":"persona_capes","ownership":"Purchased",
             "price":{"listPrice":0,"realmsInfo":{"inRealmsPlus":false},
                 "currencyId":"ecd19d3c-7635-402c-a185-eb11cb6c6946",
                 "virtualCurrencyType":"Minecoin"},
-            "rarity":"common",
-            "packType":"Persona",
-            "thumbnail":{"tag":"Thumbnail","type":"Thumbnail","url":thumbnail,"urlWithResolution":thumbnail},
+            "rarity":"common","packType":"Persona",
+            "thumbnail":{"tag":"Thumbnail","type":"Thumbnail",
+                "url":thumbnail_url,"urlWithResolution":thumbnail_url},
             "packIdentity":[{"type":"persona_piece","uuid":identity.uuid,"version":identity.version}]
         });
         let catalog=json!({
             "code":200,"status":"OK",
             "data":{"Item":{
-                "Id":id,
+                "Id":item_id,
                 "Contents":[{"Id":resource_id,"Type":"personabinary","Url":url,
                     "MinClientVersion":"1.16.0","MaxClientVersion":"65535.65535.65535"}],
                 "DisplayProperties":{"creatorName":author,"purchasable":true,
                     "packIdentity":[{"type":"persona_piece","uuid":identity.uuid,"version":identity.version}]}
             }}
         });
-        // Product and native module identities must agree. This is not
-        // proof the game will accept a synthetic unsigned Persona package.
-        // Commit all outputs together only after complete validation.
-        let catalog_bytes=serde_json::to_vec(&catalog).map_err(|e|e.to_string())?;
-        reg.catalogs.insert(id,catalog_bytes);
-        reg.assets.insert(format!("/personabinary/{resource_id}.zip"),
-            LocalAsset{data:persona,kind:AssetType::PersonaZip});
-        if let Some((path,bytes))=thumb{
-            reg.assets.insert(path,LocalAsset{data:bytes,kind:AssetType::Png});
+        let mut assets=vec![(format!("/personabinary/{resource_id}.zip"),
+            LocalAsset{data:persona,kind:AssetType::PersonaZip})];
+        if let Some(bytes)=thumbnail{
+            assets.push((thumbnail_path,LocalAsset{data:bytes,kind:AssetType::Png}));
         }
-        reg.items.push(item);
-        Ok((name,is_native))
+        Ok(PreparedCape{id:item_id,item,catalog:serde_json::to_vec(&catalog)
+            .map_err(|e|e.to_string())?,assets,native})
     }
 }
+
 #[cfg(test)]
 mod tests{
     use super::*;
@@ -437,6 +600,102 @@ mod tests{
         assert_eq!(registry.plaintext_experimental_payloads,1);
         assert_eq!(registry.native_payloads,0);
         let _=fs::remove_dir_all(&root);
+    }
+    fn write_multi(root:&Path,filename:&str,version:&str,duplicate:bool) {
+        fs::create_dir_all(root.join("capes")).unwrap();
+        let capes=if duplicate {
+            json!([
+                {"id":"red","name":"Red Cape","texture":"textures/red.png"},
+                {"id":"red","name":"Blue Cape","texture":"textures/blue.png"}
+            ])
+        }else {
+            json!([
+                {"id":"red","name":"Red Cape","texture":"textures/red.png"},
+                {"id":"blue","name":"Blue Cape","texture":"textures/blue.png"}
+            ])
+        };
+        let manifest=json!({
+            "format_version":1,
+            "id":"11111111-2222-4333-8444-555555555555",
+            "name":"My Cape Collection","author":"Test Artist","version":version,
+            "capes":capes
+        });
+        let mut writer=ZipWriter::new(File::create(root.join("capes").join(filename)).unwrap());
+        let opts=SimpleFileOptions::default();
+        writer.start_file("pack.json",opts).unwrap();
+        writer.write_all(&serde_json::to_vec(&manifest).unwrap()).unwrap();
+        for path in ["textures/red.png","textures/blue.png"] {
+            writer.start_file(path,opts).unwrap();
+            writer.write_all(&dummy_png()).unwrap();
+        }
+        writer.finish().unwrap();
+    }
+    #[test] fn multi_cape_zip_registers_all_items_and_stable_ids_across_boots_and_rename(){
+        let root=std::env::temp_dir().join(format!("cosmetics_multicape_{}",std::process::id()));
+        let _=fs::remove_dir_all(&root);
+        write_multi(&root,"old-name.zip","1.0.0",false);
+        let a=Registry::scan(&root);
+        assert_eq!(a.discovered_zip,1);
+        assert_eq!(a.accepted,1);
+        assert_eq!(a.items.len(),2);
+        assert_eq!(a.assets.len(),4);
+        assert_eq!(a.plaintext_experimental_payloads,2);
+        assert_eq!(a.items[0]["title"],"Red Cape");
+        assert_eq!(a.items[1]["title"],"Blue Cape");
+        fs::rename(root.join("capes/old-name.zip"),root.join("capes/renamed.zip")).unwrap();
+        let b=Registry::scan(&root);
+        let c=Registry::scan(&root);
+        for i in 0..2 {
+            assert_eq!(a.items[i]["id"],b.items[i]["id"]);
+            assert_eq!(b.items[i]["id"],c.items[i]["id"]);
+            assert_eq!(a.items[i]["packIdentity"],b.items[i]["packIdentity"]);
+            let key=a.items[i]["id"].as_str().unwrap();
+            assert_eq!(a.catalogs.get(key),b.catalogs.get(key));
+        }
+        let _=fs::remove_dir_all(root);
+    }
+    #[test] fn explicit_pack_version_changes_asset_urls_not_item_identity(){
+        let root=std::env::temp_dir().join(format!("cosmetics_packversion_{}",std::process::id()));
+        let _=fs::remove_dir_all(&root);
+        write_multi(&root,"collection.zip","1.0.0",false);
+        let a=Registry::scan(&root);
+        write_multi(&root,"collection.zip","1.0.1",false);
+        let b=Registry::scan(&root);
+        for i in 0..2{
+            assert_eq!(a.items[i]["id"],b.items[i]["id"]);
+            assert_eq!(a.items[i]["packIdentity"][0]["uuid"],b.items[i]["packIdentity"][0]["uuid"]);
+            assert_eq!(a.items[i]["packIdentity"][0]["version"],"1.0.0");
+            assert_eq!(b.items[i]["packIdentity"][0]["version"],"1.0.1");
+            let id=a.items[i]["id"].as_str().unwrap();
+            let first:Value=serde_json::from_slice(a.catalogs.get(id).unwrap()).unwrap();
+            let next:Value=serde_json::from_slice(b.catalogs.get(id).unwrap()).unwrap();
+            assert_ne!(first["data"]["Item"]["Contents"][0]["Url"],
+                next["data"]["Item"]["Contents"][0]["Url"]);
+        }
+        let _=fs::remove_dir_all(root);
+    }
+    #[test] fn invalid_multi_cape_pack_fails_atomically_without_partial_registration(){
+        let root=std::env::temp_dir().join(format!("cosmetics_duplicate_{}",std::process::id()));
+        let _=fs::remove_dir_all(&root);
+        write_multi(&root,"duplicate.zip","1.0.0",true);
+        let reg=Registry::scan(&root);
+        assert_eq!(reg.discovered_zip,1);
+        assert_eq!(reg.rejected,1);
+        assert!(reg.items.is_empty());
+        assert!(reg.assets.is_empty());
+        assert!(reg.catalogs.is_empty());
+        let _=fs::remove_dir_all(root);
+    }
+    #[test] fn multi_cape_pack_rejects_traversal_and_invalid_versions(){
+        assert!(!safe_entry("../textures/red.png"));
+        assert!(!safe_entry("textures\\red.png"));
+        assert!(!safe_entry("/outside.png"));
+        assert!(safe_entry("textures/red.png"));
+        assert!(safe_entry("textures/我的披风.png"));
+        assert!(safe_entry("textures/Red Cape.png"));
+        assert_eq!(version_parts("1.2.3").unwrap(),[1,2,3]);
+        assert!(version_parts("1.2").is_err());
+        assert!(version_parts("1.2.999999").is_err());
     }
     #[test] fn cape_png_requires_png_signature(){
         assert!(validate_png(b"GIF89a").is_err());

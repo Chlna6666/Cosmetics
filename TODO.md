@@ -105,3 +105,14 @@ entry grants server-side ownership.
 - [x] 将导入官方披风、Cosmos/社区披风、玩家本地 ZIP 分为动态栏目
 - [x] 原版 Owned 栏保留；跨 GridList ID 去重；模板不匹配时 fail-open
 - [ ] 用 26.40 实机验证新增栏目完整可见、可滚动、能否进入装备预览
+
+## v0.1.12 multi-cape ZIP and cache identity
+- [x] Up to 64 capes per ZIP with pack.json and per-cape stable keys
+- [x] Persist generated UUIDs at package creation; no per-launch random IDs
+- [x] Stable products and native packs across restart and outer ZIP rename
+- [x] Versioned virtual resource URL when package content version changes
+- [x] Preserve exact legacy single-cape item and URL identities
+- [x] Atomic validation/registration of multi-cape archives
+- [x] Authoring utility pack_capes.py
+- [ ] Verify client-side cache reuse over multiple Minecraft launches
+- [ ] Verify native game Persona equip of authored unsigned textures
