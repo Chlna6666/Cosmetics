@@ -99,3 +99,9 @@ entry grants server-side ownership.
 - [ ] Validate actual asset download/read sequence on Bedrock 26.40
 - [ ] Reverse-map legitimate Persona binary contents/signature validation (no entitlement forgery)
 - [ ] Implement a game-supported custom cape registration/equip workflow not reliant on unsigned Persona impersonation
+
+## v0.1.11 分组
+- [x] 对照 Cosmos 分类页的 GridList / headerComp / itemListComp 布局
+- [x] 将导入官方披风、Cosmos/社区披风、玩家本地 ZIP 分为动态栏目
+- [x] 原版 Owned 栏保留；跨 GridList ID 去重；模板不匹配时 fail-open
+- [ ] 用 26.40 实机验证新增栏目完整可见、可滚动、能否进入装备预览

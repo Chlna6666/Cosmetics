@@ -223,6 +223,15 @@ pub fn overlay(
             if add.is_empty() && local_items.is_empty() && official_preview_ids.is_empty() {return Ok(None);}
             let mut root: Value = serde_json::from_slice(original_body)
                 .map_err(|e| format!("original JSON invalid: {e}"))?;
+            if rule.name=="dressing_room_capes" {
+                // Respect the original owned cape section. Cosmos itself
+                // creates distinct GridList rows for Vanilla/Custom capes.
+                let result=crate::cape_sections::inject(
+                    &mut root,add,local_items,&official_preview_ids,
+                    &rule.identity_key)?;
+                if !result.changed(){return Ok(None);}
+                return serde_json::to_vec(&root).map(Some).map_err(|e|e.to_string());
+            }
             let target = root.pointer_mut(&rule.pointer)
                 .and_then(Value::as_array_mut)
                 .ok_or_else(|| format!("schema mismatch at {}", rule.pointer))?;

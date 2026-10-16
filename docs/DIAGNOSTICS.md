@@ -178,3 +178,7 @@ If the packaged `cosmetics.json` was not updated, older local rules take precede
 如点击后没有 `CATALOG_RESPONSE_READY` 或 `LOCAL_ASSET_REQUEST`，
 请保留从点击到失败后的完整日志，后续需要查找非 WinHTTP Persona
 装备过程及相关状态，不应伪造 server inventory 的 200/Owned 响应。
+
+## v0.1.11 页面分类
+
+官方 `Official Capes - Catalog Only`、第三方 `Cosmos & Community Capes`、个人 `My Local ZIP Capes` 是同一 `DressingRoom_Capes` 响应里的不同 `GridList`，按实际数据动态出现。每个追加区域复用当前服务端页面中的 GridList/Preview 组件，原始 `Owned` 与其他原版栏目保留。若无法找到正确 GridList 模板，原响应会按 fail-open 原样保留。分类不改变账户权益。

@@ -1,6 +1,6 @@
 # Cosmetics
 
-Version: **0.1.10**. Two Cosmos CDN-backed cape metadata presets are included,
+Version: **0.1.11**. Two Cosmos CDN-backed cape metadata presets are included,
 with **NotOwned** ownership. Their actual Persona ZIPs are **not embedded**
 or republished. The older manifest-only diagnostic ZIP is still available as
 an opt-in protocol probe.
@@ -424,3 +424,35 @@ Microsoft entitlement state has been altered.
 
 Use `cosmetics.local-only.json` from the build to isolate custom ZIPs from
 the two Cosmos metadata examples and existing imported override files.
+
+## v0.1.11 — independent cape categories, matching Cosmos page layout
+
+Cosmos' `MainPages/Capes.json` actually defines sections for owned, Vanilla,
+Spin-Off, Bedrock Cosmos, Custom, Creator and Skin Pack capes. The previous
+Cosmetics implementation appended all 3 sources into one list and obscured
+their provenance.
+
+The Cosmetics DressingRoom_Capes overlay now clones a compatible **existing**
+`GridList` + `headerComp` + `itemListComp` + preview component and creates
+separate rows when those sources exist:
+
+- `Official Capes - Catalog Only`: newly imported capes attributed to
+  Minecraft/Minecraft Dungeons. This is a **catalog classification**, not
+  an unlock or authenticated account entitlement.
+- `Cosmos & Community Capes`: other legacy/Cosmos catalog entries.
+- `My Local ZIP Capes`: self-authored `capes/*.zip`, never mixed into
+  a third-party/official catalog section.
+
+The original Owned capes grid and all existing rows remain intact. Missing
+categories are omitted instead of creating blank rows. IDs are deduplicated
+against all existing item grids. A section is created from the game's page
+components, not from a second hardcoded whole-page response. No extra files,
+IDs, or user config required.
+
+Display categorization never changes cape equipment permissions. Only the
+existing **explicit opt-in** official preview allowlist can change an
+individual `ownership` field in the HTTP page.
+
+Note: original Cosmos may contain other distinctions such as Spin-Off/Skin
+Pack, but the three new Cosmetics source groups are not a claim that
+these capes have actually been unlocked or equipped.

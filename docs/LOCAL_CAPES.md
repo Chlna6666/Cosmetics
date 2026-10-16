@@ -141,3 +141,7 @@ v0.1.8 会记录：
 点击披风后请关注 `CATALOG_RESPONSE_READY`、`LOCAL_ASSET_REQUEST` 与
 `LOCAL_ASSET_RESPONSE_READY`，以及对应的客户端读取完成事件。
 如果连资源请求都没有，不能把失败归因于 ZIP 内部解密，而应继续追踪商品和装备逻辑。
+
+## v0.1.11 独立本地披风栏目
+
+`capes/*.zip` 仍只需要一个 ZIP。游戏正常请求 `DressingRoom_Capes` 页面后，Cosmetics 会把本地 ZIP 放入 `My Local ZIP Capes` 栏，和 `Official Capes - Catalog Only`、`Cosmos & Community Capes` 分离；原版 Owned 列表不修改。分类不代表真正装备成功。
