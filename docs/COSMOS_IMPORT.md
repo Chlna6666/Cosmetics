@@ -97,3 +97,25 @@ integrity checks may still reject the package.
 
 These URLs identify reference material; inclusion does not imply project
 affiliation, sponsorship or redistribution permission.
+
+
+## v0.1.5：完整导入
+
+上游 `Capes.json` 当前列出 270 个披风商品，其中 245 个在
+`PlayfabGetPublishItemResponses.json` 可找到对应的本地响应映射。
+正常运行可以直接使用：
+
+```powershell
+py scripts/import_cosmos.py --destination . --all
+```
+
+`--limit 0` 等价 `--all`，现在默认不再限制前 15 个。
+如果需要包括没有本地 PlayFab 元数据的 25 项，可以显式追加
+`--include-unmapped`，但对应项可能无法预览或下载。
+为减轻一次请求全部元数据的耗时，脚本使用可调并行数
+`--workers 8`（范围 1–16），并输出每 25 项的进度。
+脚本不会改变官方账号权益。
+
+**游戏 26.40 的实际页面方法是 POST，不是 GET。**
+如果仍使用旧 cosmetics.json，就算更新 DLL 也会漏掉
+`DressingRoom_Capes` 与 `DressingRoom_PersonaProfile`。

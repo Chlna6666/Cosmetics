@@ -52,3 +52,12 @@ entry grants server-side ownership.
 - [x] Separate upstream capture, JSON overlay creation and client consumption
 - [x] Summarize JSON shape without leaking account inventory and credentials
 - [ ] Validate lifecycle and Persona acceptance against Bedrock UWP/GDK
+
+
+## v0.1.5
+- [x] Accept GET/POST for Bedrock 26.40 storefront layout pages
+- [x] Preserve server-advertised list capacity when appending many capes
+- [x] Fix WinHTTP Transfer-Encoding header constant to 63
+- [x] Add unbounded importer mode and parallel metadata fetch with progress
+- [ ] Verify Bedrock 26.40 POST page JSON schema against live response
+- [ ] Verify end-to-end client read and actual Persona equipability

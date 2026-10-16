@@ -19,7 +19,7 @@ const QUERY_CONTENT_TYPE: u32 = 1;
 const QUERY_CONTENT_LENGTH: u32 = 5;
 const QUERY_STATUS_CODE: u32 = 19;
 const QUERY_CONTENT_ENCODING: u32 = 29;
-const QUERY_TRANSFER_ENCODING: u32 = 6;
+const QUERY_TRANSFER_ENCODING: u32 = 63;
 const QUERY_RAW_HEADERS: u32 = 21;
 const QUERY_RAW_HEADERS_CRLF: u32 = 22;
 const ERROR_WINHTTP_HEADER_NOT_FOUND: u32 = 12150;
@@ -687,7 +687,7 @@ unsafe extern "system" fn status_bridge(h:H,context:usize,status:u32,info:H,len:
             // Only log a fixed set of known Content-Encoding values.
             let encoding_name=match encoding.to_ascii_lowercase().as_str() {
                 "gzip"=>"gzip","br"=>"br","deflate"=>"deflate",
-                "identity"=>"identity",_=>"other/unknown"
+                "identity"=>"identity",""=>"none",_=>"other/unknown"
             };
             logger(&format!("request #{id}: headers route={route} async={asynchronous} status={code:?} content_length={content_length:?} encoding={encoding_name}"));
             debug_log(&format!("request #{id}: RESPONSE_HEADERS_CAPTURED route={route} http_status={code:?} raw_content_length={content_length:?} encoding={encoding_name}"));

@@ -1,6 +1,6 @@
 # Cosmetics
 
-Version: **0.1.4**. Two Cosmos CDN-backed cape metadata presets are included,
+Version: **0.1.5**. Two Cosmos CDN-backed cape metadata presets are included,
 with **NotOwned** ownership. Their actual Persona ZIPs are **not embedded**
 or republished. The older manifest-only diagnostic ZIP is still available as
 an opt-in protocol probe.
@@ -237,3 +237,24 @@ WinHTTP delivered them, **not** that Minecraft accepted a cape as equipable.
 
 Set `debug.verbose=false` for less logging, or `debug.response_shape=false`
 to avoid additional development-only JSON inspection costs.
+
+
+## v0.1.5 Bedrock 26.40 storefront POST correction
+
+Real Bedrock 26.40 WinHTTP traces show that the game issues
+`POST /api/v2.0/layout/pages/DressingRoom_Capes` and
+`POST /api/v2.0/layout/pages/DressingRoom_PersonaProfile`.
+Previous Cosmetics releases expected GET, so the hook did not apply any
+replacement despite observing those exact page paths. Storefront routes now
+allow `GET,POST` while PlayFab and inventory endpoints remain verb-specific.
+Official entitlements and receipts are still untouched.
+
+`scripts/import_cosmos.py --destination . --all` (or `--limit 0`) imports
+every mapped cape from the current upstream page, with parallel catalog checks.
+On the inspected Cosmos revision, 270 page capes have 245 mapped catalog
+records; the other 25 have no local mapping and remain excluded by default.
+An explicit `--include-unmapped` adds those display-only items, but does not
+make their Persona ZIPs available or grant ownership.
+
+The importer adds to existing files and prints verification progress. Update
+both `Cosmetics.dll` and `cosmetics.json` from the same 0.1.5 artifact.

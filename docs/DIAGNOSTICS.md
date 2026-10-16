@@ -113,3 +113,13 @@ If the packaged `cosmetics.json` was not updated, older local rules take precede
 只有 `route matched` 而没有 `RESPONSE_CAPTURED` 表示尚未证实收到完整响应体。
 有 `RESPONSE_REPLACED` 而没有 `CLIENT_CONSUMED_OVERLAY` 说明未观察到消费完毕。
 调试版本仍不记录 Authorization、XBL 凭据、原始账户库存、完整响应 JSON。
+
+
+## v0.1.5 接口匹配已修复
+
+实机日志出现 `POST store/DressingRoom_Capes` 与
+`POST store/DressingRoom_PersonaProfile`，证实旧版 GET 匹配是漏拦截原因。
+默认商城规则现在支持 `GET,POST` 两种方法。
+成功命中后应依次观察 `route matched`、`RESPONSE_HEADERS_CAPTURED`、
+`RESPONSE_CAPTURED`、`RESPONSE_REPLACED`、`CLIENT_CONSUMED_OVERLAY`。
+仍有异常时根据新日志排查 JSON schema，而不是继续将问题归因于未安装 Hook。

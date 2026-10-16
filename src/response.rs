@@ -68,7 +68,7 @@ impl Config {
                     && path.split('?').next().is_some_and(|p|p==r.path));
             r.host.eq_ignore_ascii_case(host) &&
             path_matches &&
-            r.method.eq_ignore_ascii_case(method)
+            r.method.split(',').any(|m|m.trim().eq_ignore_ascii_case(method))
         }).cloned()
     }
     pub fn match_rule(&self, host: &str, path: &str, method: &str) -> Option<Rule> {
@@ -148,10 +148,12 @@ pub fn overlay(
                 }
                 let count=items.len();
                 if let Some(obj)=component.as_object_mut(){
-                    obj.insert("totalItems".into(),Value::from(count));
+                    let prior_total=obj.get("totalItems").and_then(Value::as_u64).unwrap_or(0);
+                    obj.insert("totalItems".into(),Value::from(prior_total.max(count as u64)));
                     if let Some(config)=obj.get_mut("customStoreRowConfiguration")
                         .and_then(Value::as_object_mut){
-                        config.insert("maxOffers".into(),Value::from(count));
+                        let prior_max=config.get("maxOffers").and_then(Value::as_u64).unwrap_or(0);
+                        config.insert("maxOffers".into(),Value::from(prior_max.max(count as u64)));
                     }
                 }
             }
@@ -201,10 +203,12 @@ pub fn overlay(
                     if parent.get("type").and_then(Value::as_str)==Some("itemListComp") {
                         let count=parent.get("items").and_then(Value::as_array)
                             .map(|items|items.len()).unwrap_or(0);
-                        parent.insert("totalItems".into(),Value::from(count));
+                        let prior_total=parent.get("totalItems").and_then(Value::as_u64).unwrap_or(0);
+                        parent.insert("totalItems".into(),Value::from(prior_total.max(count as u64)));
                         if let Some(config)=parent.get_mut("customStoreRowConfiguration")
                             .and_then(Value::as_object_mut) {
-                            config.insert("maxOffers".into(),Value::from(count));
+                            let prior_max=config.get("maxOffers").and_then(Value::as_u64).unwrap_or(0);
+                            config.insert("maxOffers".into(),Value::from(prior_max.max(count as u64)));
                         }
                     }
                 }
@@ -326,6 +330,19 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
     #[test]
+    fn list_append_never_reduces_server_advertised_capacity() {
+        let dir=std::env::temp_dir().join(format!("cosmetics_caps_{}",std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("items.json"),r#"[{"id":"added"}]"#).unwrap();
+        let mut rule=append();rule.pointer="/result/layout/0/rows/0/components/0/items".into();
+        let original=br#"{"result":{"layout":[{"rows":[{"components":[{"type":"itemListComp","items":[],"totalItems":400,"customStoreRowConfiguration":{"maxOffers":400}}]}]}]}}"#;
+        let output:Value=serde_json::from_slice(&overlay(&dir,&rule,b"",original).unwrap().unwrap()).unwrap();
+        let list=&output["result"]["layout"][0]["rows"][0]["components"][0];
+        assert_eq!(list["totalItems"],400);
+        assert_eq!(list["customStoreRowConfiguration"]["maxOffers"],400);
+        let _=fs::remove_dir_all(dir);
+    }
+    #[test]
     fn list_append_updates_render_limit_and_keeps_original_entries() {
         let dir=std::env::temp_dir().join(format!("cosmetics_item_list_{}",std::process::id()));
         fs::create_dir_all(&dir).unwrap();
@@ -421,6 +438,10 @@ mod tests {
         let market:Config=serde_json::from_str(r#"{"rules":[{"name":"capes","host":"store.mktpl.minecraft-services.net","path":"/api/v2.0/layout/pages/DressingRoom_Capes","mode":"append_array","file":"x"}]}"#).unwrap();
         assert!(market.match_rule("store.mktpl.minecraft-services.net",
             "/api/v2.0/layout/pages/DressingRoom_Capes?lang=en-US","GET").is_some());
+        let both:Config=serde_json::from_str(r#"{"rules":[{"name":"capes","host":"store.mktpl.minecraft-services.net","path":"/api/v2.0/layout/pages/DressingRoom_Capes","method":"GET,POST","mode":"append_array","file":"x"}]}"#).unwrap();
+        assert!(both.match_rule("store.mktpl.minecraft-services.net","/api/v2.0/layout/pages/DressingRoom_Capes","POST").is_some());
+        assert!(both.match_rule("store.mktpl.minecraft-services.net","/api/v2.0/layout/pages/DressingRoom_Capes","GET").is_some());
+        assert!(both.match_rule("store.mktpl.minecraft-services.net","/api/v2.0/layout/pages/DressingRoom_Capes","PUT").is_none());
         assert!(is_uuid("5bba5540-377b-4ec2-9633-4551c4e82e37"));
         assert!(!is_uuid("../.."));
     }

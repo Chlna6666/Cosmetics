@@ -2,6 +2,7 @@
 """Opt-in Cosmos response importer. No third-party bytes are redistributed
 with Cosmetics. This script runs on the user's computer, not in release CI."""
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import json
 import re
 import sys
@@ -70,7 +71,7 @@ def choose_items(items, mapping, limit, keyword):
         copy.pop("receipt", None)
         copy.pop("purchaseDate", None)
         selected.append(copy)
-        if len(selected) >= limit:
+        if limit is not None and len(selected) >= limit:
             break
     return selected
 
@@ -104,82 +105,130 @@ def validate_catalog(item_id, catalog):
         raise ValueError("catalog missing personabinary contents")
 
 
-def import_catalog(directory, max_count, keyword, bundle_zips=False):
+def import_catalog(directory, max_count=None, keyword="", bundle_zips=False, include_unmapped=False,
+                   workers=8):
     directory = Path(directory).resolve()
-    # Do not overwrite the live JSON in place until upstream files are valid.
     page = load_json(remote("MainPages/Capes.json"))
     mapping = parse_mappings(load_json(remote("LauncherJsons/PlayfabGetPublishItemResponses.json")))
-    selected = choose_items(unique_cape_items(page), mapping, max_count, keyword)
-    checked = []
-    for item in selected:
-        item_id = item["id"]
-        try:
-            response = load_json(remote(mapping[item_id]))
-            validate_catalog(item_id, response)
-            checked.append((item, response))
-        except (ValueError, KeyError, OSError, urllib.error.URLError) as exc:
-            print(f"Skipping {item.get('title', 'unknown')!r}: {exc}", file=sys.stderr)
-    if not checked:
-        raise SystemExit("No usable cape records found; no local files changed")
-    catalog_dir = directory / "overrides" / "catalog"
-    catalog_dir.mkdir(parents=True, exist_ok=True)
-    for item, response in checked:
-        (catalog_dir / (item["id"] + ".json")).write_text(
-            json.dumps(response, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    # Preserve existing user-added capes; replace only the matching items.
-    capes_file = directory / "overrides" / "capes_items.json"
-    existing = json.loads(capes_file.read_text("utf-8")) if capes_file.exists() else []
-    if not isinstance(existing, list):
-        raise ValueError("existing capes_items.json must be an array")
-    dedup = {item["id"]: item for item in existing if isinstance(item, dict)
-             and isinstance(item.get("id"), str)}
-    for item, _ in checked:
-        if item["id"] in dedup and dedup[item["id"]].get("ownership") == "Purchased":
-            continue
-        dedup[item["id"]] = item
-    capes_file.parent.mkdir(parents=True, exist_ok=True)
-    capes_file.write_text(json.dumps(list(dedup.values()), indent=2,
-                                     ensure_ascii=False) + "\n", encoding="utf-8")
-    print(f"Imported {len(checked)} Cosmos catalog entries into {directory}")
-    print("ZIP resources still use Cosmos' normal HTTPS CDN. No entitlement changed.")
-    if bundle_zips:
-        directory_zip = directory / "overrides" / "persona"
-        directory_zip.mkdir(parents=True, exist_ok=True)
-        for item, response in checked:
-            for content in response["data"]["Item"]["Contents"]:
-                resource_id = content.get("Id", "")
-                if not UUID.fullmatch(resource_id):
-                    print("Skipping ZIP with no valid Contents.Id", file=sys.stderr)
-                    continue
-                url = content["Url"]
-                with urllib.request.urlopen(url, timeout=30) as source:
-                    data = source.read(MAX_ZIP + 1)
-                if not data.startswith(b"PK\x03\x04") or len(data) > MAX_ZIP:
-                    print(f"Skipping invalid/oversized ZIP for {item['title']}", file=sys.stderr)
-                    continue
-                (directory_zip / f"{resource_id}.zip").write_bytes(data)
-                content["Url"] = (
-                    f"https://cosmetics.invalid/personabinary/{resource_id}.zip")
-            (catalog_dir / (item["id"] + ".json")).write_text(
-                json.dumps(response, indent=2) + "\n", encoding="utf-8")
-        print("Local ZIP files downloaded. This does NOT prove Persona validation or equipability.")
+    all_items = list(unique_cape_items(page))
+    available = {item.get("id") for item in all_items if UUID.fullmatch(item.get("id", ""))}
+    missing = available - set(mapping)
+    selected = choose_items(all_items, mapping, max_count, keyword)
+    print(f"Cosmos page: {len(available)} unique capes; {len(available & set(mapping))} mapped "
+          f"to catalog metadata, {len(missing)} have no published local mapping.", flush=True)
+    print(f"Fetching {len(selected)} catalog JSON files, workers={workers} "
+          f"(--limit 0 means all mapped entries).", flush=True)
 
+    def fetch_pair(item):
+        item_id=item["id"]
+        try:
+            response=load_json(remote(mapping[item_id]))
+            validate_catalog(item_id,response)
+            return (item,response,None)
+        except (ValueError,KeyError,OSError,urllib.error.URLError,TimeoutError) as exc:
+            return (item,None,str(exc))
+
+    checked=[]
+    failures=0
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        for index,(item,response,error) in enumerate(executor.map(fetch_pair,selected),1):
+            if response is not None:
+                checked.append((item,response))
+            else:
+                failures+=1
+                print(f"Skipping {item.get('title','unknown')!r}: {error}",file=sys.stderr)
+            if index%25==0 or index==len(selected):
+                print(f"  validated {index}/{len(selected)}: successful={len(checked)}, "
+                      f"failed={failures}",flush=True)
+    if not checked and not include_unmapped:
+        raise SystemExit("No usable cape records found; no local files changed")
+
+    # Only explicit local metadata. Official purchased items are never
+    # rewritten and the game's actual entitlement/inventory remains untouched.
+    catalog_dir=directory/"overrides"/"catalog"
+    catalog_dir.mkdir(parents=True,exist_ok=True)
+    for item,response in checked:
+        (catalog_dir/(item["id"]+".json")).write_text(
+            json.dumps(response,indent=2,ensure_ascii=False)+"\n",encoding="utf-8")
+    cape_file=directory/"overrides"/"capes_items.json"
+    existing=json.loads(cape_file.read_text("utf-8")) if cape_file.exists() else []
+    if not isinstance(existing,list):
+        raise ValueError("existing capes_items.json must be an array")
+    by_id={item["id"]:item for item in existing
+           if isinstance(item,dict) and isinstance(item.get("id"),str)}
+    for item,_ in checked:
+        if by_id.get(item["id"],{}).get("ownership")=="Purchased":
+            continue
+        by_id[item["id"]]=item
+    if include_unmapped:
+        for item in all_items:
+            id=item.get("id","")
+            if not UUID.fullmatch(id) or id in mapping or (keyword and keyword.casefold() not in str(item.get("title","")).casefold()):
+                continue
+            copy=json.loads(json.dumps(item))
+            copy["ownership"]="NotOwned"
+            copy.pop("receipt",None)
+            copy.pop("purchaseDate",None)
+            if by_id.get(id,{}).get("ownership")!="Purchased":
+                by_id[id]=copy
+    cape_file.parent.mkdir(parents=True,exist_ok=True)
+    cape_file.write_text(json.dumps(list(by_id.values()),indent=2,ensure_ascii=False)+"\n",
+                         encoding="utf-8")
+    print(f"Imported {len(checked)} verified Cosmos catalog records; "
+          f"local menu now has {len(by_id)} entries.",flush=True)
+    if missing:
+        print(f"NOTE: {len(missing)} upstream cape entries have no listed local catalog mapping."
+              " Use --include-unmapped to display them with official PlayFab fallback;"
+              " they are not guaranteed to load.",flush=True)
+    if failures:
+        print(f"WARNING: {failures} item(s) failed metadata validation; retry importer.",flush=True)
+    print("ZIP assets still use Cosmos HTTPS CDN; no Microsoft entitlements changed.",flush=True)
+
+    if bundle_zips:
+        directory_zip=directory/"overrides"/"persona"
+        directory_zip.mkdir(parents=True,exist_ok=True)
+        for item,response in checked:
+            for content in response["data"]["Item"]["Contents"]:
+                resource_id=content.get("Id","")
+                if not UUID.fullmatch(resource_id):
+                    print("Skipping ZIP without a valid Contents.Id",file=sys.stderr)
+                    continue
+                url=content["Url"]
+                try:
+                    with urllib.request.urlopen(url,timeout=30) as source:
+                        data=source.read(MAX_ZIP+1)
+                    if not data.startswith(b"PK\x03\x04") or len(data)>MAX_ZIP:
+                        raise ValueError("invalid or oversized ZIP")
+                    (directory_zip/f"{resource_id}.zip").write_bytes(data)
+                    content["Url"]=f"https://cosmetics.invalid/personabinary/{resource_id}.zip"
+                except (ValueError,OSError,urllib.error.URLError) as exc:
+                    print(f"ZIP skipped for {item['title']!r}: {exc}",file=sys.stderr)
+            (catalog_dir/(item["id"]+".json")).write_text(
+                json.dumps(response,indent=2,ensure_ascii=False)+"\n",encoding="utf-8")
+        print("Local ZIP download completed; in-game Persona validation remains unverified.")
 
 def main():
     parser = argparse.ArgumentParser(description="Import Cosmos JSON metadata for local-only Cosmetics use.")
     parser.add_argument("--destination", default=".", help="Directory containing cosmetics.json")
-    parser.add_argument("--limit", type=int, default=15, help="Max imported capes (1-100)")
+    parser.add_argument("--limit", type=int, default=0, help="Maximum matched capes to import; 0 = all (default)")
+    parser.add_argument("--all", action="store_true", help="Import every mapped cape (same as --limit 0)")
+    parser.add_argument("--include-unmapped", action="store_true",
+                        help="Also display upstream cape IDs without local PlayFab mappings; may be unusable")
+    parser.add_argument("--workers", type=int, default=8, help="Parallel metadata requests (1-16)")
     parser.add_argument("--name", default="", help="Only titles containing this text")
     parser.add_argument("--bundle-zips", action="store_true",
                         help="Download upstream ZIPs into local overrides/persona for use on this machine")
     parser.add_argument("--confirm-asset-rights", action="store_true",
                         help="Confirm you have permission to download/store requested third-party assets")
     args = parser.parse_args()
-    if not 1 <= args.limit <= 100:
-        parser.error("--limit must be 1..100")
+    if not 0 <= args.limit <= 10000:
+        parser.error("--limit must be 0..10000")
+    if not 1 <= args.workers <= 16:
+        parser.error("--workers must be 1..16")
     if args.bundle_zips and not args.confirm_asset_rights:
         parser.error("--bundle-zips requires --confirm-asset-rights")
-    import_catalog(args.destination, args.limit, args.name, args.bundle_zips)
+    import_catalog(args.destination, None if args.all or args.limit==0 else args.limit,
+                   args.name,args.bundle_zips,args.include_unmapped,args.workers)
 
 
 if __name__ == "__main__":
