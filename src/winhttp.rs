@@ -127,7 +127,8 @@ unsafe extern "system" fn worker(module: H) -> u32 {
     if count == 0 || count as usize >= path.len() { return 1; }
     let dll = PathBuf::from(String::from_utf16_lossy(&path[..count as usize]));
     let root = match dll.parent() { Some(p) => p.to_path_buf(), None => return 2 };
-    let cfg_bytes = match fs::read(root.join("cosmetics.json")) { Ok(v) => v, Err(_) => return 3 };
+    let cfg_bytes = fs::read(root.join("cosmetics.json"))
+        .unwrap_or_else(|_| include_bytes!("../cosmetics.json").to_vec());
     let cfg: Config = match serde_json::from_slice(&cfg_bytes) { Ok(v) => v, Err(_) => return 4 };
     let _ = fs::create_dir_all(root.join("logs"));
     let log = match OpenOptions::new().create(true).append(true)
@@ -223,7 +224,7 @@ unsafe extern "system" fn on_open_request(
         let (host,async_session) = state.connections.get(&state_key(connection))
             .cloned().unwrap_or_else(||(String::new(),true));
         let req = Request {
-            host, path:read_wide(path), method:read_wide(verb),
+            host, path:read_wide(path), method:if verb.is_null() { "GET".into() } else { read_wide(verb) },
             async_session, request_body:Vec::new(), replay:None,
         };
         state.requests.insert(state_key(h),req);

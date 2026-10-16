@@ -181,6 +181,26 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
     #[test]
+    fn catalog_item_only_replaces_matching_registered_uuid() {
+        let dir = std::env::temp_dir().join(format!("cosmetics_test_catalog_{}", std::process::id()));
+        let folder = dir.join("catalog");
+        fs::create_dir_all(&folder).unwrap();
+        let id = "5bba5540-377b-4ec2-9633-4551c4e82e37";
+        fs::write(folder.join(format!("{id}.json")),
+            format!(r#"{{"data":{{"Item":{{"Id":"{id}","Contents":[]}}}}}}"#)).unwrap();
+        let mut rule = append();
+        rule.mode = Mode::CatalogItem;
+        rule.catalog_directory = "catalog".into();
+        let original = br#"{"status":"not found"}"#;
+        let request = format!(r#"{{"itemid":"{id}"}}"#);
+        let result = overlay(&dir, &rule, request.as_bytes(), original).unwrap().unwrap();
+        let value: Value = serde_json::from_slice(&result).unwrap();
+        assert_eq!(value["data"]["Item"]["Id"], id);
+        let unknown = br#"{"itemid":"00000000-0000-0000-0000-000000000001"}"#;
+        assert!(overlay(&dir, &rule, unknown, original).unwrap().is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+    #[test]
     fn path_and_host_are_exact_and_catalog_id_is_validated() {
         let c: Config = serde_json::from_str(r#"{"rules":[{"name":"x","host":"store.example","path":"/p","mode":"append_array","pointer":"/items","file":"items.json"}]}"#).unwrap();
         assert!(c.match_rule("STORE.EXAMPLE", "/p", "GET").is_some());

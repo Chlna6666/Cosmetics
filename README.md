@@ -28,10 +28,20 @@ On Windows with Rust (MSVC toolchain + Visual Studio C++ build tools installed):
 
 Output: `target/release/cosmetics.dll`.
 
+`cosmetics.json` is also compiled into the DLL as a read-only default.
+The local configuration file, when present, takes precedence.
+
 Copy `cosmetics.dll`, `cosmetics.json`, and the `overrides/` folder
-into the same native-mod directory. Inject the DLL using BMCBL's **native**
-DLL injection facility, independently of BLoader. The DLL starts a worker thread
+into the same native-mod directory. Inject the DLL using BMCBL's **native** DLL injection facility. This DLL does not use any
+BLoader API. **Important:** BMCBL's current `preload-native` launcher path
+may still *transport/load* the DLL through BLoader. If the injection path itself
+must be BLoader-free, BMCBL needs a separate early direct-injection route;
+a late `hot-inject` may miss marketplace requests made at startup. The DLL starts a worker thread
 outside DllMain and writes `logs/cosmetics.log` beside itself.
+
+A sample native Mod manifest is provided in
+`examples/bmcbl/manifest.json`. This is only the package format: it does
+not alter the launcher's existing injection transport.
 
 No proxy, certificate installation, backend HTTP service or DLL-specific
 network connection is needed. Ordinary game HTTPS traffic uses the original TLS

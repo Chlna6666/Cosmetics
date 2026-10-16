@@ -6,6 +6,8 @@
 - [x] Add WinHTTP synchronous request/response interception and local logs
 - [x] Support local per-item PlayFab GetPublishedItem metadata response files
 - [x] Add guarded config, empty template overlays and pure Rust unit tests
+- [x] Embed a read-only default config for standalone DLL injection
+- [x] Add catalog item match and unknown UUID tests
 - [x] Log observed disabled endpoints without changing responses
 - [x] Support optional full JSON replacement for custom storefront pages (not inventory)
 - [ ] Run \`cargo test\` and \`cargo build --release\` on Windows MSVC
@@ -19,6 +21,7 @@
 - [ ] Confirm Persona signature / integrity / resource package acceptance
 - [ ] Verify local cape previews, equipment, restarts, existing entitlement preservation
 - [ ] Verify native injection with UWP and GDK, including early hook timing
+- [ ] If required, implement a BMCBL early direct-injection route independent of BLoader transport
 - [ ] Validate skin selector / persona profile row schema with real responses
 - [ ] Add a safe explicit shutdown procedure before ever supporting hot-unload
 

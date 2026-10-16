@@ -1,0 +1,7 @@
+{
+  "name": "Cosmetics",
+  "entry": "Cosmetics.dll",
+  "type": "preload-native",
+  "version": "0.1.0",
+  "inject_delay_ms": 0
+}
