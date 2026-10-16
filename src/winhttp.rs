@@ -651,7 +651,7 @@ unsafe fn finish_async(h:H,completed:bool) {
         }
     }
     let mut replay=Replay{
-        bytes:original,position:0,complete:completed,replaced:false,catalog:false,zip:false,
+        bytes:original,position:0,complete:completed,replaced:false,catalog:false,zip:false,png:false,
         strip_encoding:false,status:200,delivery_logged:false
     };
     if completed {
