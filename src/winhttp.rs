@@ -1,8 +1,7 @@
-//! WinHTTP synchronous response overlay. The DLL is standalone and has no
-//! dependency on BLoader or Minecraft's internal player/skin APIs.
-//! Requests with unknown handles, unsupported encodings, and async WinHTTP
-//! sessions always pass through. Resource ZIP URLs are not intercepted.
-use crate::response::{self, Config, Mode, Rule};
+//! Native WinHTTP responses: bounded sync buffering, async callback capture,
+//! and opt-in virtual local Persona ZIP resources. No TLS interception and no BLoader.
+use crate::response::{Config, Mode};
+use crate::{codec, persona};
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::fs::{self, File, OpenOptions};
@@ -20,6 +19,18 @@ const QUERY_CONTENT_TYPE: u32 = 1;
 const QUERY_CONTENT_LENGTH: u32 = 5;
 const QUERY_STATUS_CODE: u32 = 19;
 const QUERY_CONTENT_ENCODING: u32 = 29;
+const QUERY_TRANSFER_ENCODING: u32 = 6;
+const QUERY_RAW_HEADERS: u32 = 21;
+const QUERY_RAW_HEADERS_CRLF: u32 = 22;
+const ERROR_WINHTTP_HEADER_NOT_FOUND: u32 = 12150;
+const ERROR_IO_PENDING: u32 = 997;
+const STATUS_HEADERS: u32 = 0x0002_0000;
+const STATUS_AVAILABLE: u32 = 0x0004_0000;
+const STATUS_READ: u32 = 0x0008_0000;
+const STATUS_REQUEST_ERROR: u32 = 0x0020_0000;
+const STATUS_SEND_COMPLETE: u32 = 0x0040_0000;
+const STATUS_HANDLE_CLOSING: u32 = 0x0000_0800;
+const ADDITIONAL_CALLBACK_FLAGS: u32 = STATUS_HEADERS | STATUS_READ | STATUS_REQUEST_ERROR | STATUS_HANDLE_CLOSING;
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 const REQUEST_BODY_MAX: usize = 128 * 1024;
 const READ_CHUNK: usize = 16 * 1024;
@@ -34,6 +45,7 @@ extern "system" {
     fn GetModuleFileNameW(module: H, path: *mut u16, size: u32) -> u32;
     fn DisableThreadLibraryCalls(module: H) -> B;
     fn SetLastError(code: u32);
+    fn GetLastError() -> u32;
 }
 
 type OpenFn = unsafe extern "system" fn(*const u16,u32,*const u16,*const u16,u32)->H;
@@ -46,6 +58,8 @@ type ReadFn = unsafe extern "system" fn(H,H,u32,*mut u32)->B;
 type AvailableFn = unsafe extern "system" fn(H,*mut u32)->B;
 type HeadersFn = unsafe extern "system" fn(H,u32,*const u16,H,*mut u32,*mut u32)->B;
 type CloseFn = unsafe extern "system" fn(H)->B;
+type StatusCallback = unsafe extern "system" fn(H,usize,u32,H,u32);
+type SetCallbackFn = unsafe extern "system" fn(H,H,u32,usize)->H;
 
 static OPEN: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 static CONNECT: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
@@ -57,6 +71,7 @@ static READ: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 static AVAILABLE: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 static HEADERS: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 static CLOSE: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+static SET_CALLBACK: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 
 macro_rules! original {
     ($slot:ident, $type:ty) => {{
@@ -85,7 +100,10 @@ struct Tables {
     sessions: HashMap<usize, bool>,
     connections: HashMap<usize, (String, bool)>,
     requests: HashMap<usize, Request>,
+    callbacks: HashMap<usize, CallbackRegistration>,
 }
+#[derive(Clone, Copy)]
+struct CallbackRegistration { address: usize, flags: u32 }
 struct Request {
     host: String,
     path: String,
@@ -93,6 +111,18 @@ struct Request {
     async_session: bool,
     request_body: Vec<u8>,
     replay: Option<Replay>,
+    capture: Option<AsyncCapture>,
+    synthetic: bool,
+    status: u32,
+    callback_context: usize,
+}
+struct AsyncCapture {
+    bytes: Vec<u8>,
+    buffer: Box<[u8; READ_CHUNK]>,
+    limit: usize,
+    encoding: codec::Encoding,
+    pumping: bool,
+    needs_read: bool,
 }
 struct Replay {
     bytes: Vec<u8>,
@@ -100,6 +130,9 @@ struct Replay {
     complete: bool,
     replaced: bool,
     catalog: bool,
+    zip: bool,
+    strip_encoding: bool,
+    status: u32,
 }
 static TABLES: OnceLock<Mutex<Tables>> = OnceLock::new();
 fn tables() -> &'static Mutex<Tables> {
@@ -139,7 +172,7 @@ unsafe extern "system" fn worker(module: H) -> u32 {
         logger(&format!("hook install failed; game remains unmodified: {e}"));
         return 6;
     }
-    logger("WinHTTP hooks enabled (synchronous requests only)");
+    logger("WinHTTP hooks enabled (sync + async callback capture; local Persona ZIP available)");
     0
 }
 
@@ -161,6 +194,7 @@ unsafe fn install() -> Result<(), String> {
         (b"WinHttpQueryDataAvailable\0", on_available as H, &AVAILABLE),
         (b"WinHttpQueryHeaders\0", on_headers as H, &HEADERS),
         (b"WinHttpCloseHandle\0", on_close as H, &CLOSE),
+        (b"WinHttpSetStatusCallback\0", on_set_callback as H, &SET_CALLBACK),
     ];
     let mut installed: Vec<H> = Vec::new();
     for (symbol, detour, slot) in defs {
@@ -210,6 +244,9 @@ unsafe extern "system" fn on_connect(session:H,server:*const u16,port:u16,reserv
         let mut state = tables().lock().unwrap_or_else(|e|e.into_inner());
         let is_async = state.sessions.get(&state_key(session)).copied().unwrap_or(true);
         state.connections.insert(state_key(h),(read_wide(server),is_async));
+        if let Some(cb)=state.callbacks.get(&state_key(session)).copied() {
+            state.callbacks.insert(state_key(h),cb);
+        }
     }
     h
 }
@@ -226,11 +263,76 @@ unsafe extern "system" fn on_open_request(
         let req = Request {
             host, path:read_wide(path), method:if verb.is_null() { "GET".into() } else { read_wide(verb) },
             async_session, request_body:Vec::new(), replay:None,
+            capture:None, synthetic:false, status:200, callback_context:0,
         };
+        if let Some(cb)=state.callbacks.get(&state_key(connection)).copied() {
+            state.callbacks.insert(state_key(h),cb);
+        }
         state.requests.insert(state_key(h),req);
     }
     h
 }
+
+// The caller's callback is stored separately; our callback is only a bridge.
+// No application callback is invoked while the state mutex is held.
+unsafe fn notify_game(h:H,context:usize,status:u32,info:H,len:u32) {
+    let reg = {
+        let state=tables().lock().unwrap_or_else(|e| e.into_inner());
+        state.callbacks.get(&state_key(h)).copied()
+    };
+    if let Some(reg)=reg {
+        if reg.address!=0 && reg.flags&status!=0 {
+            let f:StatusCallback=std::mem::transmute(reg.address);
+            f(h,context,status,info,len);
+        }
+    }
+}
+unsafe extern "system" fn on_set_callback(h:H,callback:H,flags:u32,reserved:usize)->H {
+    let real=original!(SET_CALLBACK,SetCallbackFn);
+    let old={
+        tables().lock().unwrap_or_else(|e|e.into_inner()).callbacks.get(&state_key(h)).copied()
+    };
+    let is_normal=!callback.is_null() && callback as usize!=usize::MAX;
+    let replacement=if is_normal { status_bridge as H } else { callback };
+    let effective_flags=if is_normal {flags|ADDITIONAL_CALLBACK_FLAGS} else {flags};
+    let previous=real(h,replacement,effective_flags,reserved);
+    if previous as usize==usize::MAX {return previous;}
+    let mut state=tables().lock().unwrap_or_else(|e|e.into_inner());
+    if is_normal {
+        state.callbacks.insert(state_key(h),CallbackRegistration{address:callback as usize,flags});
+    } else {
+        state.callbacks.remove(&state_key(h));
+    }
+    old.map(|r|r.address as H).unwrap_or(previous)
+}
+unsafe fn invoke_headers(h:H,context:usize) {
+    notify_game(h,context,STATUS_HEADERS,ptr::null_mut(),0);
+}
+unsafe fn catalog_fast_response(h:H) -> bool {
+    let Some(runtime)=RUNTIME.get() else{return false};
+    let values={
+        let state=tables().lock().unwrap_or_else(|e|e.into_inner());
+        let Some(r)=state.requests.get(&state_key(h)) else{return false};
+        let Some(rule)=runtime.cfg.match_rule(&r.host,&r.path,&r.method) else{return false};
+        if !matches!(rule.mode,Mode::CatalogItem|Mode::ReplaceJson){return false;}
+        (rule,r.request_body.clone())
+    };
+    match crate::response::overlay(&runtime.root,&values.0,&values.1,b"") {
+        Ok(Some(bytes)) if bytes.len()<=runtime.cfg.max_capture_bytes => {
+            let mut state=tables().lock().unwrap_or_else(|e|e.into_inner());
+            if let Some(r)=state.requests.get_mut(&state_key(h)){
+                r.replay=Some(Replay{bytes,position:0,complete:true,replaced:true,
+                    catalog:true,zip:false,strip_encoding:false,status:200});
+            }
+            logger(&format!("{}: local catalog page synthesized",values.0.name));
+            true
+        }
+        Ok(None)=>false,
+        Ok(Some(_))=>{logger("local catalog response exceeds configured limit");false}
+        Err(e)=>{logger(&format!("local catalog response rejected: {e}"));false}
+    }
+}
+
 unsafe extern "system" fn on_send(
     h:H,headers:*const u16,header_len:u32,optional:H,optional_len:u32,total_len:u32,ctx:usize
 )->B {
@@ -241,12 +343,55 @@ unsafe extern "system" fn on_send(
             req.request_body.extend_from_slice(bytes);
         }
     }
+    let virtual_resource={
+        let state=tables().lock().unwrap_or_else(|e|e.into_inner());
+        state.requests.get(&state_key(h)).and_then(|r| {
+            if r.host.eq_ignore_ascii_case(persona::LOCAL_HOST) {
+                Some((r.path.clone(),r.method.clone(),r.async_session))
+            }else{None}
+        })
+    };
+    if let Some((path,method,async_request))=virtual_resource {
+        let loaded=if method.eq_ignore_ascii_case("GET"){
+            RUNTIME.get().map(|runtime|persona::load(&runtime.root,&path))
+        }else{None};
+        let (data,status)=match loaded {
+            Some(Ok(Some(resource)))=>{
+                logger(&format!("Persona ZIP found: {} ({} bytes)",resource.resource_uuid,resource.bytes.len()));
+                (resource.bytes,200)
+            }
+            Some(Err(e))=>{logger(&format!("Persona ZIP rejected: {e}"));(Vec::new(),404)}
+            _=>{logger("local Persona ZIP not found or invalid request");(Vec::new(),404)}
+        };
+        {
+            let mut state=tables().lock().unwrap_or_else(|e|e.into_inner());
+            if let Some(r)=state.requests.get_mut(&state_key(h)) {
+                r.synthetic=true;r.status=status;r.callback_context=ctx;
+                r.replay=Some(Replay{bytes:data,position:0,complete:true,replaced:true,
+                    catalog:false,zip:true,strip_encoding:false,status});
+            }
+        }
+        if async_request {notify_game(h,ctx,STATUS_SEND_COMPLETE,ptr::null_mut(),0);}
+        return 1;
+    }
+    if let Some(r)=tables().lock().unwrap_or_else(|e|e.into_inner())
+        .requests.get_mut(&state_key(h)){r.callback_context=ctx;}
     original!(SEND, SendFn)(h,headers,header_len,optional,optional_len,total_len,ctx)
 }
 unsafe extern "system" fn on_write(h:H,data:*const c_void,len:u32,written:*mut u32)->B {
+    // Synthetic Persona downloads are GET-only: prevent writes to a virtual host.
+    if tables().lock().unwrap_or_else(|e|e.into_inner())
+        .requests.get(&state_key(h)).is_some_and(|r|r.synthetic) {
+        return 0;
+    }
     let result = original!(WRITE, WriteFn)(h,data,len,written);
     if result != 0 && !data.is_null() {
-        let transferred = if written.is_null() { 0 } else { *written as usize };
+        // Async WriteData has no output counter; successful queued writes are
+        // captured from the buffer at submission time for PlayFab itemid routing.
+        let async_request=tables().lock().unwrap_or_else(|e|e.into_inner())
+            .requests.get(&state_key(h)).is_some_and(|r|r.async_session);
+        let transferred = if async_request {len as usize}
+            else if written.is_null(){0}else{*written as usize};
         let mut state = tables().lock().unwrap_or_else(|e|e.into_inner());
         if let Some(req) = state.requests.get_mut(&state_key(h)) {
             if transferred <= REQUEST_BODY_MAX.saturating_sub(req.request_body.len()) {
@@ -274,104 +419,273 @@ unsafe fn query_string(h:H,code:u32)->Option<String> {
     let end=wide.iter().position(|x|*x==0).unwrap_or(wide.len());
     Some(String::from_utf16_lossy(&wide[..end]))
 }
-unsafe extern "system" fn on_receive(h:H,reserved:H)->B {
-    let real = original!(RECEIVE, ReceiveFn);
-    let ok = real(h,reserved);
-    if ok==0 {return ok;}
-    let (rule,body) = {
-        let state = tables().lock().unwrap_or_else(|e|e.into_inner());
-        let req = match state.requests.get(&state_key(h)) {Some(r)=>r,None=>return ok};
-        if req.async_session {return ok;}
-        let runtime=match RUNTIME.get(){Some(r)=>r,None=>return ok};
-        let rule=match runtime.cfg.observe_rule(&req.host,&req.path,&req.method){
-            Some(r)=>r,None=>return ok
+
+unsafe fn begin_async_capture(h:H,context:usize)->bool {
+    let Some(runtime)=RUNTIME.get() else{return false};
+    let rule={
+        let state=tables().lock().unwrap_or_else(|e|e.into_inner());
+        let Some(req)=state.requests.get(&state_key(h)) else{return false};
+        if !req.async_session{return false;}
+        let Some(rule)=runtime.cfg.match_rule(&req.host,&req.path,&req.method) else{return false};
+        if rule.mode!=Mode::AppendArray {return false;}
+        rule
+    };
+    if query_number(h,QUERY_STATUS_CODE)!=Some(200) {return false;}
+    let encoding=match codec::Encoding::parse(&query_string(h,QUERY_CONTENT_ENCODING).unwrap_or_default()) {
+        Ok(c)=>c,Err(e)=>{logger(&format!("{}: {e}; passthrough",rule.name));return false}
+    };
+    let max=runtime.cfg.max_capture_bytes.clamp(1024,16*1024*1024);
+    if query_number(h,QUERY_CONTENT_LENGTH).is_some_and(|n|n as usize>max) {
+        logger(&format!("{}: response larger than capture limit",rule.name));
+        return false;
+    }
+    {
+        let mut state=tables().lock().unwrap_or_else(|e|e.into_inner());
+        let Some(req)=state.requests.get_mut(&state_key(h)) else{return false};
+        if req.capture.is_some()||req.replay.is_some(){return false;}
+        req.callback_context=context;
+        req.capture=Some(AsyncCapture {
+            bytes:Vec::new(),buffer:Box::new([0;READ_CHUNK]),
+            limit:max,encoding,pumping:false,needs_read:true
+        });
+    }
+    logger(&format!("{}: async prefetch started",rule.name));
+    pump_async(h);
+    true
+}
+unsafe fn pump_async(h:H) {
+    {
+        let mut state=tables().lock().unwrap_or_else(|e|e.into_inner());
+        let Some(cap)=state.requests.get_mut(&state_key(h)).and_then(|r|r.capture.as_mut()) else{return};
+        if cap.pumping{return;}
+        cap.pumping=true;
+    }
+    loop {
+        let buf={
+            let mut state=tables().lock().unwrap_or_else(|e|e.into_inner());
+            let Some(cap)=state.requests.get_mut(&state_key(h)).and_then(|r|r.capture.as_mut()) else{return};
+            if !cap.needs_read {cap.pumping=false;return;}
+            cap.needs_read=false;
+            cap.buffer.as_mut_ptr()
         };
+        // The stable Box owns the buffer until HANDLE_CLOSING. This call may
+        // complete inline (reentrant callback) or later on a WinHTTP thread.
+        let success=original!(READ,ReadFn)(h,buf as H,READ_CHUNK as u32,ptr::null_mut());
+        if success==0 {
+            let error=GetLastError();
+            if error!=ERROR_IO_PENDING {
+                logger("asynchronous WinHttpReadData failed; replay buffered original bytes");
+                finish_async(h,false);
+                return;
+            }
+        }
+        let continue_now={
+            let mut state=tables().lock().unwrap_or_else(|e|e.into_inner());
+            let Some(cap)=state.requests.get_mut(&state_key(h)).and_then(|r|r.capture.as_mut()) else{return};
+            if cap.needs_read {true}else{cap.pumping=false;false}
+        };
+        if !continue_now{return;}
+    }
+}
+unsafe fn finish_async(h:H,completed:bool) {
+    let Some(runtime)=RUNTIME.get() else{return};
+    let taken={
+        let mut state=tables().lock().unwrap_or_else(|e|e.into_inner());
+        let Some(req)=state.requests.get_mut(&state_key(h)) else{return};
+        let Some(cap)=req.capture.take() else{return};
+        // Keep the stable storage alive until WinHTTP has reported completion.
+        // There must not be an outstanding read when this path is reached.
+        (req.host.clone(),req.path.clone(),req.method.clone(),req.request_body.clone(),
+         req.callback_context,cap.bytes,cap.encoding)
+    };
+    let (host,path,method,body,context,original,encoding)=taken;
+    let rule=runtime.cfg.match_rule(&host,&path,&method);
+    let mut replay=Replay{
+        bytes:original,position:0,complete:completed,replaced:false,catalog:false,zip:false,
+        strip_encoding:false,status:200
+    };
+    if completed {
+        if let Some(rule)=rule {
+            match codec::rewrite(&runtime.root,&rule,&body,&replay.bytes,encoding,
+                runtime.cfg.max_capture_bytes.clamp(1024,16*1024*1024)) {
+                Ok(Some(change)) => {
+                    replay.bytes=change.body;
+                    replay.replaced=true;
+                    replay.strip_encoding=change.strip_encoding;
+                    logger(&format!("{}: async response overlay applied",rule.name));
+                }
+                Ok(None)=>logger(&format!("{}: async response unchanged",rule.name)),
+                Err(e)=>logger(&format!("{}: async overlay failed; original kept ({e})",rule.name)),
+            }
+        }
+    }
+    {
+        let mut state=tables().lock().unwrap_or_else(|e|e.into_inner());
+        if let Some(req)=state.requests.get_mut(&state_key(h)){req.replay=Some(replay);}
+    }
+    invoke_headers(h,context);
+}
+unsafe extern "system" fn status_bridge(h:H,context:usize,status:u32,info:H,len:u32) {
+    if status==STATUS_HEADERS {
+        if catalog_fast_response(h) {
+            invoke_headers(h,context);
+            return;
+        }
+        if begin_async_capture(h,context) {return;}
+    } else if status==STATUS_READ {
+        let action={
+            let mut state=tables().lock().unwrap_or_else(|e|e.into_inner());
+            if let Some(cap)=state.requests.get_mut(&state_key(h)).and_then(|r|r.capture.as_mut()) {
+                if info==cap.buffer.as_mut_ptr() as H {
+                    if len==0 {Some(0)}
+                    else if len as usize>READ_CHUNK || cap.bytes.len().saturating_add(len as usize)>cap.limit {
+                        Some(2)
+                    } else {
+                        cap.bytes.extend_from_slice(std::slice::from_raw_parts(info as *const u8,len as usize));
+                        cap.needs_read=true;
+                        Some(1)
+                    }
+                }else{None}
+            }else{None}
+        };
+        match action {
+            Some(0)=>{finish_async(h,true);return;}
+            Some(1)=>{pump_async(h);return;}
+            Some(2)=>{logger("async response exceeded size limit");finish_async(h,false);return;}
+            _=>{}
+        }
+    } else if status==STATUS_REQUEST_ERROR {
+        let active={
+            tables().lock().unwrap_or_else(|e|e.into_inner()).requests.get(&state_key(h))
+                .is_some_and(|r|r.capture.is_some())
+        };
+        if active {finish_async(h,false);return;}
+    }
+    notify_game(h,context,status,info,len);
+    if status==STATUS_HANDLE_CLOSING {
+        let mut state=tables().lock().unwrap_or_else(|e|e.into_inner());
+        state.requests.remove(&state_key(h));
+        state.connections.remove(&state_key(h));
+        state.sessions.remove(&state_key(h));
+        state.callbacks.remove(&state_key(h));
+    }
+}
+
+unsafe extern "system" fn on_receive(h:H,reserved:H)->B {
+    let synthetic={
+        let state=tables().lock().unwrap_or_else(|e|e.into_inner());
+        state.requests.get(&state_key(h)).filter(|r|r.synthetic)
+            .map(|r|(r.async_session,r.callback_context))
+    };
+    if let Some((async_req,context))=synthetic {
+        if async_req{invoke_headers(h,context);}
+        return 1;
+    }
+    let ok=original!(RECEIVE,ReceiveFn)(h,reserved);
+    if ok==0{return ok;}
+    if catalog_fast_response(h) {return ok;}
+    let (rule,body)={
+        let state=tables().lock().unwrap_or_else(|e|e.into_inner());
+        let Some(req)=state.requests.get(&state_key(h)) else{return ok};
+        if req.async_session{return ok;}
+        let Some(rt)=RUNTIME.get() else{return ok};
+        let Some(rule)=rt.cfg.observe_rule(&req.host,&req.path,&req.method) else{return ok};
         if !rule.enabled {
-            logger(&format!("{}: observed; overlay disabled; passthrough",rule.name));
+            logger(&format!("{}: response observed; overlay disabled",rule.name));
             return ok;
         }
         (rule,req.request_body.clone())
     };
-    let runtime=match RUNTIME.get(){Some(r)=>r,None=>return ok};
-    let status=query_number(h,QUERY_STATUS_CODE).unwrap_or(0);
-    if status != 200 && rule.mode != Mode::CatalogItem {
-        logger(&format!("{}: upstream status {}; passthrough",rule.name,status));return ok;
+    let Some(rt)=RUNTIME.get() else{return ok};
+    if query_number(h,QUERY_STATUS_CODE)!=Some(200) {
+        logger(&format!("{}: unexpected upstream status; passthrough",rule.name));return ok;
     }
-    if let Some(encoding)=query_string(h,QUERY_CONTENT_ENCODING) {
-        if !encoding.is_empty() && !encoding.eq_ignore_ascii_case("identity") {
-            logger(&format!("{}: encoded response ({encoding}); passthrough",rule.name));
-            return ok;
-        }
+    let encoding=match codec::Encoding::parse(&query_string(h,QUERY_CONTENT_ENCODING).unwrap_or_default()) {
+        Ok(v)=>v,Err(e)=>{logger(&format!("{}: {e}",rule.name));return ok}
+    };
+    let limit=rt.cfg.max_capture_bytes.clamp(1024,16*1024*1024);
+    if query_number(h,QUERY_CONTENT_LENGTH).is_some_and(|n|n as usize>limit) {
+        logger(&format!("{}: content length exceeds limit",rule.name));return ok;
     }
-    let bound=runtime.cfg.max_capture_bytes.clamp(1024,16*1024*1024);
-    if query_number(h,QUERY_CONTENT_LENGTH).is_some_and(|n|n as usize>bound) {
-        logger(&format!("{}: response exceeds capture limit; passthrough",rule.name));
-        return ok;
+    let mut raw=Vec::new();
+    let mut completed=false;
+    loop {
+        let remaining=(limit+1).saturating_sub(raw.len());
+        if remaining==0{break;}
+        let mut temp=[0u8;READ_CHUNK];
+        let capacity=temp.len().min(remaining) as u32;
+        let mut bytes=0u32;
+        let success=original!(READ,ReadFn)(h,temp.as_mut_ptr() as H,capacity,&mut bytes);
+        if success==0 || bytes>capacity {break;}
+        if bytes==0 {completed=true;break;}
+        raw.extend_from_slice(&temp[..bytes as usize]);
     }
-    let mut original=Vec::new();
-    let mut complete=false;
-    let reader=original!(READ, ReadFn);
-    while original.len()<bound {
-        let mut chunk=[0u8;READ_CHUNK];
-        let mut n=0u32;
-        let cap=chunk.len().min(bound-original.len()) as u32;
-        let success=reader(h,chunk.as_mut_ptr() as H,cap,&mut n);
-        if success==0 {break;}
-        if n==0 {complete=true;break;}
-        if n>cap {break;}
-        original.extend_from_slice(&chunk[..n as usize]);
-    }
-    let mut replaced=false;
-    let mut final_body=original;
-    if complete {
-        match response::overlay(&runtime.root,&rule,&body,&final_body) {
-            Ok(Some(modified)) if modified.len() <= bound => {
-                final_body=modified;
-                replaced=true;
-                logger(&format!("{}: applied local overlay ({} bytes)",rule.name,final_body.len()));
+    let mut replay=Replay {bytes:raw,position:0,complete:completed,replaced:false,
+        catalog:false,zip:false,strip_encoding:false,status:200};
+    if completed && replay.bytes.len()<=limit {
+        match codec::rewrite(&rt.root,&rule,&body,&replay.bytes,encoding,limit) {
+            Ok(Some(change)) => {
+                replay.bytes=change.body;
+                replay.replaced=true;replay.strip_encoding=change.strip_encoding;
+                logger(&format!("{}: synchronous JSON overlay applied",rule.name));
             }
-            Ok(Some(_)) => logger(&format!("{}: replacement too large; original preserved",rule.name)),
-            Ok(None) => logger(&format!("{}: no additions; original preserved",rule.name)),
-            Err(e) => logger(&format!("{}: overlay rejected ({e}); original preserved",rule.name)),
+            Ok(None)=>logger(&format!("{}: no local additions",rule.name)),
+            Err(e)=>logger(&format!("{}: overlay failed, replay original ({e})",rule.name)),
         }
     } else {
-        logger(&format!("{}: incomplete buffered response; replay and passthrough",rule.name));
+        logger(&format!("{}: response not completely buffered; replay original data",rule.name));
     }
-    let replay=Replay {bytes:final_body,position:0,complete,replaced,catalog:rule.mode==Mode::CatalogItem || rule.mode==Mode::ReplaceJson};
     if let Some(req)=tables().lock().unwrap_or_else(|e|e.into_inner())
-        .requests.get_mut(&state_key(h)) {
-        req.replay=Some(replay);
-    }
+        .requests.get_mut(&state_key(h)) {req.replay=Some(replay);}
     ok
 }
 unsafe extern "system" fn on_read(h:H,buffer:H,cap:u32,out:*mut u32)->B {
-    if !buffer.is_null() && !out.is_null() {
+    if buffer.is_null() && cap>0 {return original!(READ,ReadFn)(h,buffer,cap,out);}
+    let response={
         let mut state=tables().lock().unwrap_or_else(|e|e.into_inner());
-        if let Some(replay)=state.requests.get_mut(&state_key(h)).and_then(|r|r.replay.as_mut()) {
-            let left=replay.bytes.len()-replay.position;
-            if left>0 || replay.complete {
-                let n=left.min(cap as usize);
-                ptr::copy_nonoverlapping(replay.bytes.as_ptr().add(replay.position),buffer as *mut u8,n);
-                replay.position+=n;
-                *out=n as u32;
-                return 1;
+        let Some(req)=state.requests.get_mut(&state_key(h)) else{
+            return original!(READ,ReadFn)(h,buffer,cap,out);
+        };
+        let async_req=req.async_session;
+        let ctx=req.callback_context;
+        req.replay.as_mut().and_then(|rep|{
+            let remain=rep.bytes.len().saturating_sub(rep.position);
+            if remain==0 && !rep.complete{return None;}
+            let length=remain.min(cap as usize);
+            if length>0 && !buffer.is_null() {
+                ptr::copy_nonoverlapping(rep.bytes.as_ptr().add(rep.position),buffer as *mut u8,length);
             }
-        }
+            rep.position+=length;
+            Some((length as u32,async_req,ctx))
+        })
+    };
+    if let Some((count,async_req,ctx))=response {
+        if !out.is_null() {*out=count;}
+        if async_req {notify_game(h,ctx,STATUS_READ,buffer,count);}
+        return 1;
     }
-    original!(READ, ReadFn)(h,buffer,cap,out)
+    original!(READ,ReadFn)(h,buffer,cap,out)
 }
 unsafe extern "system" fn on_available(h:H,out:*mut u32)->B {
-    if !out.is_null() {
+    let replay={
         let state=tables().lock().unwrap_or_else(|e|e.into_inner());
-        if let Some(replay)=state.requests.get(&state_key(h)).and_then(|r|r.replay.as_ref()) {
-            let remain=replay.bytes.len()-replay.position;
-            if remain>0 || replay.complete {
-                *out=remain.min(u32::MAX as usize) as u32;
-                return 1;
-            }
+        state.requests.get(&state_key(h)).and_then(|r|{
+            r.replay.as_ref().and_then(|rep|{
+                let remain=rep.bytes.len().saturating_sub(rep.position);
+                if remain==0 && !rep.complete {return None;}
+                Some((remain.min(u32::MAX as usize) as u32,r.async_session,r.callback_context))
+            })
+        })
+    };
+    if let Some((count,async_req,ctx))=replay{
+        if !out.is_null(){*out=count;}
+        if async_req {
+            let mut local=count;
+            notify_game(h,ctx,STATUS_AVAILABLE,&mut local as *mut u32 as H,4);
         }
+        return 1;
     }
-    original!(AVAILABLE, AvailableFn)(h,out)
+    original!(AVAILABLE,AvailableFn)(h,out)
 }
 unsafe fn synthetic_header(query:u32,buffer:H,length:*mut u32,text:&str)->B {
     if length.is_null(){return 0;}
@@ -397,24 +711,50 @@ unsafe extern "system" fn on_headers(
         if let Some(rep)=state.requests.get(&state_key(h))
             .and_then(|r|r.replay.as_ref()).filter(|r|r.replaced) {
             let code=query&0xffff;
+            let size=rep.bytes.len().to_string();
+            let content_type=if rep.zip {"application/zip"} else {"application/json"};
             if code==QUERY_CONTENT_LENGTH {
-                return synthetic_header(query,buffer,length,&rep.bytes.len().to_string());
+                return synthetic_header(query,buffer,length,&size);
             }
-            if code==QUERY_STATUS_CODE && rep.catalog {
-                return synthetic_header(query,buffer,length,"200");
+            if code==QUERY_STATUS_CODE {
+                return synthetic_header(query,buffer,length,&rep.status.to_string());
             }
-            if code==QUERY_CONTENT_TYPE && rep.catalog {
-                return synthetic_header(query,buffer,length,"application/json");
+            if code==QUERY_CONTENT_TYPE {
+                return synthetic_header(query,buffer,length,content_type);
+            }
+            if rep.zip || rep.strip_encoding {
+                if matches!(code, QUERY_CONTENT_ENCODING|QUERY_TRANSFER_ENCODING) {
+                    SetLastError(ERROR_WINHTTP_HEADER_NOT_FOUND);
+                    return 0;
+                }
+            }
+            if code==QUERY_RAW_HEADERS_CRLF && rep.zip {
+                let raw=format!("HTTP/1.1 {} OK\r\nContent-Type: {}\r\nContent-Length: {}\r\n\r\n",
+                    rep.status,content_type,size);
+                return synthetic_header(query,buffer,length,&raw);
+            }
+            if code==QUERY_RAW_HEADERS && rep.zip {
+                // This is a MULTI_SZ response.
+                let raw=format!("HTTP/1.1 {} OK\0Content-Type: {}\0Content-Length: {}\0\0",
+                    rep.status,content_type,size);
+                return synthetic_header(query,buffer,length,&raw);
             }
         }
     }
-    original!(HEADERS, HeadersFn)(h,query,name,buffer,length,index)
+    original!(HEADERS,HeadersFn)(h,query,name,buffer,length,index)
 }
 unsafe extern "system" fn on_close(h:H)->B {
-    let mut state=tables().lock().unwrap_or_else(|e|e.into_inner());
-    state.requests.remove(&state_key(h));
-    state.connections.remove(&state_key(h));
-    state.sessions.remove(&state_key(h));
-    drop(state);
-    original!(CLOSE, CloseFn)(h)
+    let keep_capture={
+        let state=tables().lock().unwrap_or_else(|e|e.into_inner());
+        state.requests.get(&state_key(h)).is_some_and(|r|r.capture.is_some())
+            || state.callbacks.contains_key(&state_key(h))
+    };
+    if !keep_capture {
+        let mut state=tables().lock().unwrap_or_else(|e|e.into_inner());
+        state.requests.remove(&state_key(h));
+        state.connections.remove(&state_key(h));
+        state.sessions.remove(&state_key(h));
+        state.callbacks.remove(&state_key(h));
+    }
+    original!(CLOSE,CloseFn)(h)
 }
