@@ -1,0 +1,16 @@
+{
+  "id": "18f19bc4-cc0b-4d73-bc4a-894ee3fb5bbd",
+  "contentType": "PersonaDurable",
+  "title": "Cosmetics Diagnostic Cape",
+  "creatorName": "Cosmetics Diagnostic",
+  "pieceType": "persona_capes",
+  "ownership": "NotOwned",
+  "packType": "Persona",
+  "packIdentity": [
+    {
+      "type": "persona_piece",
+      "uuid": "30074de9-0c60-4096-b051-758c2d2f9488",
+      "version": "1.0.0"
+    }
+  ]
+}

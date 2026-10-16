@@ -1,0 +1,29 @@
+{
+  "code": 200,
+  "status": "OK",
+  "data": {
+    "Item": {
+      "Id": "18f19bc4-cc0b-4d73-bc4a-894ee3fb5bbd",
+      "Contents": [
+        {
+          "Id": "30074de9-0c60-4096-b051-758c2d2f9488",
+          "Type": "personabinary",
+          "Url": "https://cosmetics.invalid/personabinary/30074de9-0c60-4096-b051-758c2d2f9488.zip",
+          "MinClientVersion": "1.16.0",
+          "MaxClientVersion": "65535.65535.65535"
+        }
+      ],
+      "DisplayProperties": {
+        "creatorName": "Cosmetics Diagnostic",
+        "purchasable": false,
+        "packIdentity": [
+          {
+            "type": "persona_piece",
+            "uuid": "30074de9-0c60-4096-b051-758c2d2f9488",
+            "version": "1.0.0"
+          }
+        ]
+      }
+    }
+  }
+}

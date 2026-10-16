@@ -89,23 +89,39 @@ response hook alone does **not** bypass signatures or server-side ownership.
 
 ## Current technical boundary
 
-This implementation hooks **WinHTTP synchronous requests only**:
+This implementation hooks **WinHTTP synchronous requests and asynchronous status callbacks**:
 WinHttpOpen, WinHttpConnect, WinHttpOpenRequest, WinHttpSendRequest,
 WinHttpWriteData, WinHttpReceiveResponse, WinHttpReadData,
-WinHttpQueryDataAvailable, WinHttpQueryHeaders and WinHttpCloseHandle.
+WinHttpQueryDataAvailable, WinHttpQueryHeaders, WinHttpSetStatusCallback and WinHttpCloseHandle.
 
 On matching responses, it reads the original body (up to 4 MiB by default),
 produces a local JSON overlay, then replays that body via original WinHTTP
 read APIs. For custom locally registered catalog IDs, it can return HTTP 200
 metadata even if the original catalog response was not successful.
 
+A JSON response may be gzip, deflate or brotli encoded. The hook applies a
+bounded decoder and exposes modified responses as uncompressed data. Untouched
+responses retain their original bytes and headers. Native callback and header
+behavior still requires target-version testing.
+
+**Virtual Persona resource URL:** Place a pre-existing Persona ZIP named
+`<resource-uuid>.zip` under `overrides/persona/`, and register its corresponding
+PlayFab catalog record with `Contents[].Url` set to
+`https://cosmetics.invalid/personabinary/<resource-uuid>.zip`.
+The DLL answers requests for this reserved name entirely inside WinHTTP, without
+sending a DNS request or touching official premium_cache/persona. The file
+must contain a plaintext `manifest.json` at the ZIP root and a
+`persona_piece` module. **Successful delivery is not proof that Minecraft
+accepts the package or allows it to be equipped.**
+
 The module intentionally **does not handle**:
-- Other HTTP stacks, WinHTTP asynchronous callbacks, HTTP response encodings
-  requiring gzip/br decompression, or already-open sessions when injected late.
+- Other HTTP stacks or WinHTTP sessions opened before native DLL injection.
+- Unverified callback registration patterns that do not use WinHttpSetStatusCallback.
 - All forms of header enumeration / raw HTTP response headers; applications
   that use raw headers require further implementation.
-- Directly creating a Persona ZIP, translating arbitrary unsupported skin
-  formats into the game's Persona format, or injecting local ZIP bytes.
+- Producing *valid signed* Persona binaries or translating proprietary skin formats.
+  A local Persona ZIP can now be supplied as opaque bytes from overrides/persona.
+  In-game accept/equip remains subject to the game's own validation.
 - Any entitlement signature bypass, genuine Microsoft inventory modification,
   offline marketplace impersonation or guarantees about multiplayer visibility.
 
@@ -131,7 +147,8 @@ WinHTTP flow passes through to Minecraft unchanged.
 6. Test preview, selection, equip, restart, reconnect and UWP/GDK separately.
 
 Never log Authorization, MCToken, account IDs, complete response JSON or
-receipts. No GitHub Actions are added; run local tests before release.
+receipts. Windows CI builds an x64 package and uploads it as an Actions artifact;
+CI cannot replace UWP/GDK tests on the actual game.
 
 ## License
 
