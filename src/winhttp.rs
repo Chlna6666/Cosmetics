@@ -1131,9 +1131,10 @@ unsafe extern "system" fn on_headers(
     let replay={
         let state=tables().lock().unwrap_or_else(|e|e.into_inner());
         state.requests.get(&state_key(h))
-            .and_then(|r|r.replay.as_ref())
-            .filter(|r|r.replaced)
-            .map(|rep|(rep.bytes.len(),rep.status,rep.png,rep.zip,rep.catalog,rep.strip_encoding,r.synthetic))
+            .and_then(|request|request.replay.as_ref()
+                .filter(|rep|rep.replaced)
+                .map(|rep|(rep.bytes.len(),rep.status,rep.png,rep.zip,rep.catalog,
+                    rep.strip_encoding,request.synthetic)))
     };
     if let Some((size,status,png,zip,_catalog,strip_encoding,synthetic))=replay {
         let key=query&0xffff;
