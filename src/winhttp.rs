@@ -166,7 +166,7 @@ unsafe extern "system" fn worker(module: H) -> u32 {
     let _ = fs::create_dir_all(root.join("logs"));
     let log = match OpenOptions::new().create(true).append(true)
         .open(root.join("logs").join("cosmetics.log")) { Ok(f) => f, Err(_) => return 5 };
-    let _ = RUNTIME.set(Runtime { cfg, root, log });
+    let _ = RUNTIME.set(Runtime { cfg, root, log: Mutex::new(log) });
     logger("initializing independent WinHTTP module; fail-open is enabled");
     if let Err(e) = install() {
         logger(&format!("hook install failed; game remains unmodified: {e}"));

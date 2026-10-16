@@ -34,12 +34,13 @@ pub fn load(root: &Path, path: &str) -> Result<Option<ZipPayload>, String> {
         .map_err(|e| e.to_string())?).map_err(|e| format!("invalid ZIP: {e}"))?;
     if archive.len() > 4096 { return Err("Persona ZIP has too many files".into()); }
     // Only inspect a small plaintext manifest, not binary or encrypted cape resources.
-    let mut manifest = archive.by_name("manifest.json")
+    let mut manifest_file = archive.by_name("manifest.json")
         .map_err(|e| format!("missing plain manifest.json: {e}"))?;
-    if manifest.size() > 256 * 1024 { return Err("manifest too large".into()); }
+    if manifest_file.size() > 256 * 1024 { return Err("manifest too large".into()); }
     let mut plain = Vec::new();
-    manifest.by_ref().take(256 * 1024 + 1).read_to_end(&mut plain)
+    manifest_file.by_ref().take(256 * 1024 + 1).read_to_end(&mut plain)
         .map_err(|e| format!("manifest read failed: {e}"))?;
+    drop(manifest_file);
     let manifest: Value = serde_json::from_slice(&plain)
         .map_err(|e| format!("invalid persona manifest: {e}"))?;
     let modules = manifest.get("modules").and_then(Value::as_array)
@@ -47,7 +48,6 @@ pub fn load(root: &Path, path: &str) -> Result<Option<ZipPayload>, String> {
     if !modules.iter().any(|m| m.get("type").and_then(Value::as_str)==Some("persona_piece")) {
         return Err("manifest has no persona_piece module".into());
     }
-    drop(manifest);
     drop(archive);
     let bytes = fs::read(&file_path).map_err(|e| format!("reading Persona ZIP failed: {e}"))?;
     Ok(Some(ZipPayload { bytes, resource_uuid: id.to_string() }))

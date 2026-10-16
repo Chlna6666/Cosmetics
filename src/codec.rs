@@ -1,7 +1,7 @@
 //! Bounded decoding of HTTP entities. Encoding is only removed from the
 //! synthetic headers if replacement of a complete entity succeeded.
 use crate::response::{self, Rule};
-use std::io::{self, Read};
+use std::io::Read;
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
