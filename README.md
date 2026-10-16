@@ -1,5 +1,7 @@
 # Cosmetics
 
+Version: **0.1.1 diagnostic build**. Built-in sample is intentionally NOT an equipable cape.
+
 Minecraft Bedrock (Windows) standalone native **Rust DLL** for cosmetic dressing-room
 HTTP response overlays. This is a research build, not a proven cape unlocker.
 
@@ -63,6 +65,11 @@ query string), and HTTP verb. Only active rules are processed.
 | `/Catalog/GetPublishedItem` | active | Override responses for exact, explicitly registered local item IDs |
 | `/Catalog/Search` | inactive | Experimental catalog list extension |
 
+The release includes one **NotOwned test cape entry** by default to verify
+the Dressing Room route. This is not a real wearable cape and does not grant
+ownership. To disable the diagnostic item, set `overrides/capes_items.json`
+to `[]`. Read [docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md) for expected logs.
+
 Array overlay files contain a JSON array. Empty arrays mean **no change**.
 Append mode requires an existing JSON array at the configured JSON Pointer.
 If the structure changed, the module *replays the original body* instead of
@@ -109,7 +116,9 @@ behavior still requires target-version testing.
 PlayFab catalog record with `Contents[].Url` set to
 `https://cosmetics.invalid/personabinary/<resource-uuid>.zip`.
 The DLL answers requests for this reserved name entirely inside WinHTTP, without
-sending a DNS request or touching official premium_cache/persona. The file
+sending a DNS request or touching official premium_cache/persona. The packaged probe ZIP contains a minimal plaintext manifest and **no
+actual cape**. This only tests local ZIP delivery, not game equipability.
+A real ZIP
 must contain a plaintext `manifest.json` at the ZIP root and a
 `persona_piece` module. **Successful delivery is not proof that Minecraft
 accepts the package or allows it to be equipped.**

@@ -17,6 +17,9 @@
 - [ ] Add proper gzip/br support and raw header consistency if needed
 - [ ] Handle WinHTTP asynchronous callbacks if game uses asynchronous mode
 - [ ] Validate repeated reads, query headers, HTTP 404 catalog mock, failure replay
+- [x] Log sanitized matched requests, captured request body sizes, and per-response action
+- [x] Add a non-equipable diagnostic cape item, catalog metadata and manifest-only ZIP
+- [ ] Confirm status callback, request body and manifest-only ZIP delivery using Minecraft
 - [ ] Add opt-in local ZIP hosting or verified cache path, if required
 - [ ] Confirm Persona signature / integrity / resource package acceptance
 - [ ] Verify local cape previews, equipment, restarts, existing entitlement preservation

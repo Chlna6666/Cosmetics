@@ -27,18 +27,19 @@ jobs:
       - name: Create distribution directory
         shell: pwsh
         run: |
-          $out = "dist/Cosmetics-v0.1.0-windows-x64"
+          $out = "dist/Cosmetics-v0.1.1-windows-x64"
           New-Item -ItemType Directory -Force "$out/overrides/persona" | Out-Null
           Copy-Item "target/x86_64-pc-windows-msvc/release/cosmetics.dll" "$out/Cosmetics.dll"
           Copy-Item "cosmetics.json", "README.md", "LICENSE" "$out"
+          Copy-Item "docs/DIAGNOSTICS.md" "$out/DIAGNOSTICS.md"
           Copy-Item "examples/bmcbl/manifest.json" "$out/manifest.json"
           Copy-Item "overrides/*.json" "$out/overrides"
           Copy-Item "overrides/catalog" "$out/overrides" -Recurse
-          Copy-Item "overrides/persona/README.md" "$out/overrides/persona"
-          Compress-Archive -Path "$out" -DestinationPath "dist/Cosmetics-v0.1.0-windows-x64.zip"
+          Copy-Item "overrides/persona/*" "$out/overrides/persona" -Recurse
+          Compress-Archive -Path "$out" -DestinationPath "dist/Cosmetics-v0.1.1-windows-x64.zip"
       - uses: actions/upload-artifact@v4
         with:
-          name: Cosmetics-v0.1.0-windows-x64
-          path: dist/Cosmetics-v0.1.0-windows-x64.zip
+          name: Cosmetics-v0.1.1-windows-x64
+          path: dist/Cosmetics-v0.1.1-windows-x64.zip
           if-no-files-found: error
           retention-days: 30

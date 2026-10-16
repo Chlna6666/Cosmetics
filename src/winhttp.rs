@@ -8,7 +8,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
 use std::ptr;
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 type H = *mut c_void;
@@ -86,6 +86,7 @@ struct Runtime {
     log: Mutex<File>,
 }
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
+static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 fn logger(message: &str) {
     if let Some(r) = RUNTIME.get() {
         let mut out = r.log.lock().unwrap_or_else(|e| e.into_inner());
@@ -105,6 +106,10 @@ struct Tables {
 #[derive(Clone, Copy)]
 struct CallbackRegistration { address: usize, flags: u32 }
 struct Request {
+    id: u64,
+    diagnostic_route: Option<String>,
+    catalog_checked: bool,
+    body_overflow: bool,
     host: String,
     path: String,
     method: String,
@@ -167,12 +172,14 @@ unsafe extern "system" fn worker(module: H) -> u32 {
     let log = match OpenOptions::new().create(true).append(true)
         .open(root.join("logs").join("cosmetics.log")) { Ok(f) => f, Err(_) => return 5 };
     let _ = RUNTIME.set(Runtime { cfg, root, log: Mutex::new(log) });
-    logger("initializing independent WinHTTP module; fail-open is enabled");
+    logger("Cosmetics v0.1.1-diagnostic; independent WinHTTP module; fail-open enabled");
+    logger(&format!("loaded rules={}; enabled={}; diagnostics=redacted",RUNTIME.get().unwrap().cfg.rules.len(),
+        RUNTIME.get().unwrap().cfg.rules.iter().filter(|r|r.enabled).count()));
     if let Err(e) = install() {
         logger(&format!("hook install failed; game remains unmodified: {e}"));
         return 6;
     }
-    logger("WinHTTP hooks enabled (sync + async callback capture; local Persona ZIP available)");
+    logger("WinHTTP hooks installed; open the Dressing Room capes page to see a route match");
     0
 }
 
@@ -260,8 +267,19 @@ unsafe extern "system" fn on_open_request(
         let mut state = tables().lock().unwrap_or_else(|e|e.into_inner());
         let (host,async_session) = state.connections.get(&state_key(connection))
             .cloned().unwrap_or_else(||(String::new(),true));
+        let method=if verb.is_null() { "GET".into() } else { read_wide(verb) };
+        let path=read_wide(path);
+        let id=NEXT_REQUEST_ID.fetch_add(1,Ordering::Relaxed);
+        let diagnostic_route=RUNTIME.get().and_then(|rt|
+            rt.cfg.observe_rule(&host,&path,&method).map(|rule| {
+                format!("{} ({})",rule.name,if rule.enabled {"enabled"} else {"disabled"})
+            })
+        );
+        let is_commerce_host=RUNTIME.get().is_some_and(|rt|
+            rt.cfg.rules.iter().any(|rule|rule.host.eq_ignore_ascii_case(&host)));
         let req = Request {
-            host, path:read_wide(path), method:if verb.is_null() { "GET".into() } else { read_wide(verb) },
+            id, diagnostic_route: diagnostic_route.clone(), catalog_checked:false,
+            body_overflow:false, host, path, method,
             async_session, request_body:Vec::new(), replay:None,
             capture:None, synthetic:false, status:200, callback_context:0,
         };
@@ -269,6 +287,16 @@ unsafe extern "system" fn on_open_request(
             state.callbacks.insert(state_key(h),cb);
         }
         state.requests.insert(state_key(h),req);
+        drop(state);
+        if let Some(name)=diagnostic_route {
+            logger(&format!("request #{id}: route matched {name}; async={async_session}"));
+        } else if RUNTIME.get().is_some() {
+            // Never write raw paths, query values, tokens, accounts or URLs.
+            // This safely distinguishes an endpoint mismatch from no WinHTTP traffic.
+            if is_commerce_host {
+                logger(&format!("request #{id}: commerce host observed but path/verb not matched"));
+            }
+        }
     }
     h
 }
@@ -308,40 +336,75 @@ unsafe extern "system" fn on_set_callback(h:H,callback:H,flags:u32,reserved:usiz
 unsafe fn invoke_headers(h:H,context:usize) {
     notify_game(h,context,STATUS_HEADERS,ptr::null_mut(),0);
 }
-unsafe fn catalog_fast_response(h:H) -> bool {
+unsafe fn catalog_fast_response(h:H)->bool {
     let Some(runtime)=RUNTIME.get() else{return false};
-    let values={
-        let state=tables().lock().unwrap_or_else(|e|e.into_inner());
-        let Some(r)=state.requests.get(&state_key(h)) else{return false};
+    // Never diagnose the same item twice (ReceiveResponse and HEADERS callback).
+    let found={
+        let mut state=tables().lock().unwrap_or_else(|e|e.into_inner());
+        let Some(r)=state.requests.get_mut(&state_key(h)) else{return false};
+        if r.catalog_checked{return r.replay.as_ref().is_some_and(|rep|rep.replaced && rep.catalog);}
         let Some(rule)=runtime.cfg.match_rule(&r.host,&r.path,&r.method) else{return false};
         if !matches!(rule.mode,Mode::CatalogItem|Mode::ReplaceJson){return false;}
-        (rule,r.request_body.clone())
+        r.catalog_checked=true;
+        (r.id,rule,r.request_body.clone(),r.body_overflow)
     };
-    match crate::response::overlay(&runtime.root,&values.0,&values.1,b"") {
+    let (id,rule,body,overflow)=found;
+    let structure=crate::response::catalog_request_state(&body);
+    logger(&format!("request #{id}: catalog lookup {} body_bytes={} body_state={structure} overflow={overflow}",rule.name,body.len()));
+    if overflow {return false;}
+    // CatalogItem should only replace a registered local ID. Unknown official
+    // item requests stay on the official PlayFab response path.
+    if rule.mode==Mode::CatalogItem && structure!="valid_itemid" {
+        logger(&format!("request #{id}: catalog not modified; check request body capture"));
+        return false;
+    }
+    match crate::response::overlay(&runtime.root,&rule,&body,b"") {
         Ok(Some(bytes)) if bytes.len()<=runtime.cfg.max_capture_bytes => {
             let mut state=tables().lock().unwrap_or_else(|e|e.into_inner());
             if let Some(r)=state.requests.get_mut(&state_key(h)){
                 r.replay=Some(Replay{bytes,position:0,complete:true,replaced:true,
                     catalog:true,zip:false,strip_encoding:false,status:200});
             }
-            logger(&format!("{}: local catalog page synthesized",values.0.name));
+            logger(&format!("request #{id}: catalog local response applied ({})",rule.name));
             true
         }
-        Ok(None)=>false,
-        Ok(Some(_))=>{logger("local catalog response exceeds configured limit");false}
-        Err(e)=>{logger(&format!("local catalog response rejected: {e}"));false}
+        Ok(None)=>{
+            logger(&format!("request #{id}: catalog item not registered locally; passthrough"));
+            false
+        }
+        Ok(Some(_))=>{
+            logger(&format!("request #{id}: catalog local response exceeds bound; passthrough"));
+            false
+        }
+        Err(e)=>{
+            logger(&format!("request #{id}: catalog response rejected ({e}); passthrough"));
+            false
+        }
     }
 }
-
 unsafe extern "system" fn on_send(
     h:H,headers:*const u16,header_len:u32,optional:H,optional_len:u32,total_len:u32,ctx:usize
 )->B {
-    if !optional.is_null() && (optional_len as usize) <= REQUEST_BODY_MAX {
-        let bytes = std::slice::from_raw_parts(optional as *const u8,optional_len as usize);
-        if let Some(req) = tables().lock().unwrap_or_else(|e|e.into_inner())
-            .requests.get_mut(&state_key(h)) {
-            req.request_body.extend_from_slice(bytes);
+    let mut captured:Option<(u64,String,usize,usize,bool)>=None;
+    {
+        let mut state=tables().lock().unwrap_or_else(|e|e.into_inner());
+        if let Some(req)=state.requests.get_mut(&state_key(h)) {
+            if optional_len>0 && !optional.is_null() {
+                let count=optional_len as usize;
+                if count <= REQUEST_BODY_MAX.saturating_sub(req.request_body.len()) {
+                    let bytes=std::slice::from_raw_parts(optional as *const u8,count);
+                    req.request_body.extend_from_slice(bytes);
+                } else {
+                    req.body_overflow=true;
+                }
+            }
+            if let Some(route)=req.diagnostic_route.as_ref() {
+                captured=Some((req.id,route.clone(),req.request_body.len(),total_len as usize,req.body_overflow));
+            }
         }
+    }
+    if let Some((id,route,bytes,expected,overflow))=captured {
+        logger(&format!("request #{id}: send {route}; captured_body_bytes={bytes}; declared_total_bytes={expected}; overflow={overflow}"));
     }
     let virtual_resource={
         let state=tables().lock().unwrap_or_else(|e|e.into_inner());
@@ -379,26 +442,40 @@ unsafe extern "system" fn on_send(
     original!(SEND, SendFn)(h,headers,header_len,optional,optional_len,total_len,ctx)
 }
 unsafe extern "system" fn on_write(h:H,data:*const c_void,len:u32,written:*mut u32)->B {
-    // Synthetic Persona downloads are GET-only: prevent writes to a virtual host.
+    // Synthetic Persona downloads are GET-only. No write is ever sent to DNS.
     if tables().lock().unwrap_or_else(|e|e.into_inner())
         .requests.get(&state_key(h)).is_some_and(|r|r.synthetic) {
         return 0;
     }
-    let result = original!(WRITE, WriteFn)(h,data,len,written);
-    if result != 0 && !data.is_null() {
-        // Async WriteData has no output counter; successful queued writes are
-        // captured from the buffer at submission time for PlayFab itemid routing.
+    let result=original!(WRITE,WriteFn)(h,data,len,written);
+    let error=if result==0 {GetLastError()}else{0};
+    if !data.is_null() && len>0 {
         let async_request=tables().lock().unwrap_or_else(|e|e.into_inner())
             .requests.get(&state_key(h)).is_some_and(|r|r.async_session);
-        let transferred = if async_request {len as usize}
-            else if written.is_null(){0}else{*written as usize};
-        let mut state = tables().lock().unwrap_or_else(|e|e.into_inner());
-        if let Some(req) = state.requests.get_mut(&state_key(h)) {
-            if transferred <= REQUEST_BODY_MAX.saturating_sub(req.request_body.len()) {
-                req.request_body.extend_from_slice(std::slice::from_raw_parts(data as *const u8,transferred));
+        // In an async WinHTTP session, ERROR_IO_PENDING indicates the queued
+        // write uses the caller's live buffer. Copy it now, before it is freed.
+        // The diagnostic describes it as queued, not as a confirmed delivery.
+        let accepted=result!=0 || (async_request && error==ERROR_IO_PENDING);
+        if accepted {
+            let count=if async_request {len as usize}
+                else if written.is_null(){0}else{(*written as usize).min(len as usize)};
+            let mut message=None;
+            {
+                let mut state=tables().lock().unwrap_or_else(|e|e.into_inner());
+                if let Some(req)=state.requests.get_mut(&state_key(h)) {
+                    if count<=REQUEST_BODY_MAX.saturating_sub(req.request_body.len()) {
+                        req.request_body.extend_from_slice(std::slice::from_raw_parts(data as *const u8,count));
+                    } else {req.body_overflow=true;}
+                    if let Some(route)=req.diagnostic_route.as_ref() {
+                        message=Some(format!("request #{}: write {route}; submitted_bytes={count}; captured_body_bytes={}; queued={}; overflow={}",
+                            req.id,req.request_body.len(),result==0,req.body_overflow));
+                    }
+                }
             }
+            if let Some(message)=message {logger(&message);}
         }
     }
+    if result==0 {SetLastError(error);}
     result
 }
 
@@ -430,7 +507,11 @@ unsafe fn begin_async_capture(h:H,context:usize)->bool {
         if rule.mode!=Mode::AppendArray {return false;}
         rule
     };
-    if query_number(h,QUERY_STATUS_CODE)!=Some(200) {return false;}
+    let status=query_number(h,QUERY_STATUS_CODE);
+    if status!=Some(200) {
+        logger(&format!("{}: async headers status={status:?}; passthrough",rule.name));
+        return false;
+    }
     let encoding=match codec::Encoding::parse(&query_string(h,QUERY_CONTENT_ENCODING).unwrap_or_default()) {
         Ok(c)=>c,Err(e)=>{logger(&format!("{}: {e}; passthrough",rule.name));return false}
     };
@@ -527,6 +608,14 @@ unsafe fn finish_async(h:H,completed:bool) {
 }
 unsafe extern "system" fn status_bridge(h:H,context:usize,status:u32,info:H,len:u32) {
     if status==STATUS_HEADERS {
+        let note={
+            let state=tables().lock().unwrap_or_else(|e|e.into_inner());
+            state.requests.get(&state_key(h)).and_then(|r|
+                r.diagnostic_route.as_ref().map(|route|(r.id,route.clone(),r.async_session)))
+        };
+        if let Some((id,route,asynchronous))=note {
+            logger(&format!("request #{id}: response headers callback {route}; async={asynchronous}"));
+        }
         if catalog_fast_response(h) {
             invoke_headers(h,context);
             return;
@@ -583,6 +672,14 @@ unsafe extern "system" fn on_receive(h:H,reserved:H)->B {
     }
     let ok=original!(RECEIVE,ReceiveFn)(h,reserved);
     if ok==0{return ok;}
+    let note={
+        let state=tables().lock().unwrap_or_else(|e|e.into_inner());
+        state.requests.get(&state_key(h)).and_then(|r|
+            r.diagnostic_route.as_ref().map(|route|(r.id,route.clone(),r.async_session)))
+    };
+    if let Some((id,route,asynchronous))=note {
+        logger(&format!("request #{id}: WinHttpReceiveResponse ok; route={route}; async={asynchronous}"));
+    }
     if catalog_fast_response(h) {return ok;}
     let (rule,body)={
         let state=tables().lock().unwrap_or_else(|e|e.into_inner());

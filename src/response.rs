@@ -142,6 +142,16 @@ pub fn overlay(
     }
 }
 
+/// Redacted diagnostics for POST /Catalog/GetPublishedItem. Never logs the
+/// item ID or the body, only its structural state.
+pub fn catalog_request_state(body: &[u8]) -> &'static str {
+    if body.is_empty() { return "empty_body"; }
+    let Ok(value) = serde_json::from_slice::<Value>(body) else { return "invalid_json"; };
+    let Some(id) = value.get("itemid").or_else(|| value.get("itemId"))
+        .and_then(Value::as_str) else { return "missing_itemid"; };
+    if is_uuid(id) { "valid_itemid" } else { "invalid_itemid" }
+}
+
 fn is_uuid(v: &str) -> bool {
     v.len() == 36 && v.bytes().enumerate().all(|(i, b)| {
         if [8, 13, 18, 23].contains(&i) { b == b'-' }
@@ -200,6 +210,17 @@ mod tests {
         let unknown = br#"{"itemid":"00000000-0000-0000-0000-000000000001"}"#;
         assert!(overlay(&dir, &rule, unknown, original).unwrap().is_none());
         let _ = fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn catalog_request_state_is_redacted_and_classifies_body() {
+        assert_eq!(catalog_request_state(b""), "empty_body");
+        assert_eq!(catalog_request_state(b"bad"), "invalid_json");
+        assert_eq!(catalog_request_state(br#"{}"#), "missing_itemid");
+        assert_eq!(catalog_request_state(br#"{"itemid":"oops"}"#), "invalid_itemid");
+        assert_eq!(
+            catalog_request_state(br#"{"itemid":"5bba5540-377b-4ec2-9633-4551c4e82e37"}"#),
+            "valid_itemid"
+        );
     }
     #[test]
     fn path_and_host_are_exact_and_catalog_id_is_validated() {
