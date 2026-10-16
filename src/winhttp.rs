@@ -643,20 +643,19 @@ unsafe extern "system" fn on_read(h:H,buffer:H,cap:u32,out:*mut u32)->B {
     if buffer.is_null() && cap>0 {return original!(READ,ReadFn)(h,buffer,cap,out);}
     let response={
         let mut state=tables().lock().unwrap_or_else(|e|e.into_inner());
-        let Some(req)=state.requests.get_mut(&state_key(h)) else{
-            return original!(READ,ReadFn)(h,buffer,cap,out);
-        };
-        let async_req=req.async_session;
-        let ctx=req.callback_context;
-        req.replay.as_mut().and_then(|rep|{
-            let remain=rep.bytes.len().saturating_sub(rep.position);
-            if remain==0 && !rep.complete{return None;}
-            let length=remain.min(cap as usize);
-            if length>0 && !buffer.is_null() {
-                ptr::copy_nonoverlapping(rep.bytes.as_ptr().add(rep.position),buffer as *mut u8,length);
-            }
-            rep.position+=length;
-            Some((length as u32,async_req,ctx))
+        state.requests.get_mut(&state_key(h)).and_then(|req|{
+            let async_req=req.async_session;
+            let ctx=req.callback_context;
+            req.replay.as_mut().and_then(|rep|{
+                let remain=rep.bytes.len().saturating_sub(rep.position);
+                if remain==0 && !rep.complete{return None;}
+                let length=remain.min(cap as usize);
+                if length>0 && !buffer.is_null() {
+                    ptr::copy_nonoverlapping(rep.bytes.as_ptr().add(rep.position),buffer as *mut u8,length);
+                }
+                rep.position+=length;
+                Some((length as u32,async_req,ctx))
+            })
         })
     };
     if let Some((count,async_req,ctx))=response {
