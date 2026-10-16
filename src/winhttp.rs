@@ -166,17 +166,25 @@ unsafe extern "system" fn worker(module: H) -> u32 {
     if count == 0 || count as usize >= path.len() { return 1; }
     let dll = PathBuf::from(String::from_utf16_lossy(&path[..count as usize]));
     let root = match dll.parent() { Some(p) => p.to_path_buf(), None => return 2 };
-    let cfg_bytes = fs::read(root.join("cosmetics.json"))
-        .unwrap_or_else(|_| include_bytes!("../cosmetics.json").to_vec());
+    let (cfg_bytes,config_source)=match fs::read(root.join("cosmetics.json")) {
+        Ok(bytes)=>(bytes,"external_cosmetics_json"),
+        Err(_)=>(include_bytes!("../cosmetics.json").to_vec(),"embedded_defaults")
+    };
     let cfg: Config = match serde_json::from_slice(&cfg_bytes) { Ok(v) => v, Err(_) => return 4 };
     let _ = fs::create_dir_all(root.join("logs"));
     let log = match OpenOptions::new().create(true).append(true)
         .open(root.join("logs").join("cosmetics.log")) { Ok(f) => f, Err(_) => return 5 };
     let _ = RUNTIME.set(Runtime { cfg, root, log: Mutex::new(log) });
-    logger(&format!("Cosmetics version={} profile=diagnostic, module=WinHTTP, fail_open=true",
+    logger("============================================================");
+    logger(&format!("session_start build_version={} module=WinHTTP config_source={config_source} fail_open=true",
         env!("CARGO_PKG_VERSION")));
-    logger(&format!("loaded rules={}; enabled={}; diagnostics=redacted",RUNTIME.get().unwrap().cfg.rules.len(),
+    logger(&format!("loaded_rules={} enabled_rules={} diagnostic_fields=redacted",
+        RUNTIME.get().unwrap().cfg.rules.len(),
         RUNTIME.get().unwrap().cfg.rules.iter().filter(|r|r.enabled).count()));
+    for rule in &RUNTIME.get().unwrap().cfg.rules {
+        logger(&format!("rule={} enabled={} method={} mode={:?}",
+            rule.name,rule.enabled,rule.method,rule.mode));
+    }
     if let Err(e) = install() {
         logger(&format!("hook install failed; game remains unmodified: {e}"));
         return 6;
