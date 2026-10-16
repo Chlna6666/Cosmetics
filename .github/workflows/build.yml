@@ -29,8 +29,10 @@ jobs:
       - name: Create distribution directory
         shell: pwsh
         run: |
-          $out = "dist/Cosmetics-v0.1.6-windows-x64"
+          $out = "dist/Cosmetics-v0.1.7-windows-x64"
           New-Item -ItemType Directory -Force "$out/overrides/persona" | Out-Null
+          New-Item -ItemType Directory -Force "$out/capes" | Out-Null
+          Copy-Item "capes/README.md" "$out/capes/README.md"
           Copy-Item "target/x86_64-pc-windows-msvc/release/cosmetics.dll" "$out/Cosmetics.dll"
           Copy-Item "cosmetics.json", "README.md", "LICENSE" "$out"
           Copy-Item "docs/DIAGNOSTICS.md" "$out/DIAGNOSTICS.md"
@@ -40,11 +42,13 @@ jobs:
           Copy-Item "overrides/persona/*" "$out/overrides/persona" -Recurse
           New-Item -ItemType Directory -Force "$out/scripts" | Out-Null
           Copy-Item "scripts/import_cosmos.py" "$out/scripts"
+          Copy-Item "scripts/pack_cape.py" "$out/scripts"
           Copy-Item "docs/COSMOS_IMPORT.md" "$out/COSMOS_IMPORT.md"
-          Compress-Archive -Path "$out" -DestinationPath "dist/Cosmetics-v0.1.6-windows-x64.zip"
+          Copy-Item "docs/LOCAL_CAPES.md" "$out/LOCAL_CAPES.md"
+          Compress-Archive -Path "$out" -DestinationPath "dist/Cosmetics-v0.1.7-windows-x64.zip"
       - uses: actions/upload-artifact@v4
         with:
-          name: Cosmetics-v0.1.6-windows-x64
-          path: dist/Cosmetics-v0.1.6-windows-x64.zip
+          name: Cosmetics-v0.1.7-windows-x64
+          path: dist/Cosmetics-v0.1.7-windows-x64.zip
           if-no-files-found: error
           retention-days: 30

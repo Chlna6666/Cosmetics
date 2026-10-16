@@ -1,7 +1,7 @@
 //! Native WinHTTP responses: bounded sync buffering, async callback capture,
 //! and opt-in virtual local Persona ZIP resources. No TLS interception and no BLoader.
 use crate::response::{Config, Mode};
-use crate::{codec, persona, diagnostics, debug};
+use crate::{codec, persona, diagnostics, debug, local_capes};
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::fs::{self, File, OpenOptions};
@@ -150,6 +150,7 @@ struct Replay {
     replaced: bool,
     catalog: bool,
     zip: bool,
+    png: bool,
     strip_encoding: bool,
     status: u32,
     delivery_logged: bool,
@@ -189,7 +190,10 @@ unsafe extern "system" fn worker(module: H) -> u32 {
     let log = match OpenOptions::new().create(true).append(true)
         .open(root.join("logs").join("cosmetics.log")) { Ok(f) => f, Err(_) => return 5 };
     let _ = RUNTIME.set(Runtime { cfg, root, log: Mutex::new(log) });
+    let registry=local_capes::initialize(&RUNTIME.get().unwrap().root);
     logger("============================================================");
+    logger(&format!("local_capes folder=capes loaded={} (no external JSON or Cosmos required)",local_capes::count()));
+    for diagnostic in &registry.diagnostics {logger(&format!("local_capes: {diagnostic}"));}
     logger(&format!("session_start build_version={} module=WinHTTP config_source={config_source} fail_open=true",
         env!("CARGO_PKG_VERSION")));
     logger(&format!("loaded_rules={} enabled_rules={} diagnostic_fields=redacted",
@@ -393,7 +397,7 @@ unsafe fn catalog_fast_response(h:H)->bool {
             let mut state=tables().lock().unwrap_or_else(|e|e.into_inner());
             if let Some(r)=state.requests.get_mut(&state_key(h)){
                 r.replay=Some(Replay{bytes,position:0,complete:true,replaced:true,
-                    catalog:true,zip:false,strip_encoding:false,status:200,delivery_logged:false});
+                    catalog:true,zip:false,png:false,strip_encoding:false,status:200,delivery_logged:false});
             }
             logger(&format!("request #{id}: catalog local response applied ({})",rule.name));
             debug_log(&format!("request #{id}: CATALOG_RESPONSE_REPLACED local_catalog_item=true"));
@@ -449,23 +453,31 @@ unsafe extern "system" fn on_send(
         })
     };
     if let Some((path,method,async_request))=virtual_resource {
-        let loaded=if method.eq_ignore_ascii_case("GET"){
-            RUNTIME.get().map(|runtime|persona::load(&runtime.root,&path))
-        }else{None};
-        let (data,status)=match loaded {
-            Some(Ok(Some(resource)))=>{
-                logger(&format!("Persona ZIP found: {} ({} bytes)",resource.resource_uuid,resource.bytes.len()));
-                (resource.bytes,200)
+        let mut image=false;
+        let (data,status)=if !method.eq_ignore_ascii_case("GET") {
+            logger("local virtual asset refused non-GET request");
+            (Vec::new(),405)
+        } else if let Some((bytes,kind))=local_capes::asset(&path) {
+            image=kind==local_capes::AssetType::Png;
+            logger(&format!("local cape virtual resource delivered kind={kind:?} bytes={}",bytes.len()));
+            (bytes.to_vec(),200)
+        } else {
+            let loaded=RUNTIME.get().map(|runtime|persona::load(&runtime.root,&path));
+            match loaded {
+                Some(Ok(Some(resource)))=>{
+                    logger(&format!("legacy Persona ZIP found: {} ({} bytes)",resource.resource_uuid,resource.bytes.len()));
+                    (resource.bytes,200)
+                }
+                Some(Err(e))=>{logger(&format!("legacy Persona ZIP rejected: {e}"));(Vec::new(),404)}
+                _=>{logger("virtual local cape asset unavailable; no network request was sent");(Vec::new(),404)}
             }
-            Some(Err(e))=>{logger(&format!("Persona ZIP rejected: {e}"));(Vec::new(),404)}
-            _=>{logger("local Persona ZIP not found or invalid request");(Vec::new(),404)}
         };
         {
             let mut state=tables().lock().unwrap_or_else(|e|e.into_inner());
             if let Some(r)=state.requests.get_mut(&state_key(h)) {
                 r.synthetic=true;r.status=status;r.callback_context=ctx;
                 r.replay=Some(Replay{bytes:data,position:0,complete:true,replaced:true,
-                    catalog:false,zip:true,strip_encoding:false,status,delivery_logged:false});
+                    catalog:false,zip:!image,png:image,strip_encoding:false,status,delivery_logged:false});
             }
         }
         debug_log(&format!("virtual Persona ZIP response prepared status={status}; async={async_request}"));
@@ -808,7 +820,7 @@ unsafe extern "system" fn on_receive(h:H,reserved:H)->B {
         }
     }
     let mut replay=Replay {bytes:raw,position:0,complete:completed,replaced:false,
-        catalog:false,zip:false,strip_encoding:false,status:200,delivery_logged:false};
+        catalog:false,zip:false,png:false,strip_encoding:false,status:200,delivery_logged:false};
     if completed && replay.bytes.len()<=limit {
         match codec::rewrite(&rt.root,&rule,&body,&replay.bytes,encoding,limit) {
             Ok(Some(change)) => {
@@ -912,7 +924,7 @@ unsafe extern "system" fn on_headers(
             .and_then(|r|r.replay.as_ref()).filter(|r|r.replaced) {
             let code=query&0xffff;
             let size=rep.bytes.len().to_string();
-            let content_type=if rep.zip {"application/zip"} else {"application/json"};
+            let content_type=if rep.png {"image/png"} else if rep.zip {"application/zip"} else {"application/json"};
             if code==QUERY_CONTENT_LENGTH {
                 return synthetic_header(query,buffer,length,&size);
             }
@@ -922,18 +934,18 @@ unsafe extern "system" fn on_headers(
             if code==QUERY_CONTENT_TYPE {
                 return synthetic_header(query,buffer,length,content_type);
             }
-            if rep.zip || rep.strip_encoding {
+            if rep.zip || rep.png || rep.strip_encoding {
                 if matches!(code, QUERY_CONTENT_ENCODING|QUERY_TRANSFER_ENCODING) {
                     SetLastError(ERROR_WINHTTP_HEADER_NOT_FOUND);
                     return 0;
                 }
             }
-            if code==QUERY_RAW_HEADERS_CRLF && rep.zip {
+            if code==QUERY_RAW_HEADERS_CRLF && (rep.zip || rep.png) {
                 let raw=format!("HTTP/1.1 {} OK\r\nContent-Type: {}\r\nContent-Length: {}\r\n\r\n",
                     rep.status,content_type,size);
                 return synthetic_header(query,buffer,length,&raw);
             }
-            if code==QUERY_RAW_HEADERS && rep.zip {
+            if code==QUERY_RAW_HEADERS && (rep.zip || rep.png) {
                 // This is a MULTI_SZ response.
                 let raw=format!("HTTP/1.1 {} OK\0Content-Type: {}\0Content-Length: {}\0\0",
                     rep.status,content_type,size);

@@ -6,6 +6,7 @@ pub mod debug;
 pub mod codec;
 pub mod persona;
 pub mod resources;
+pub mod local_capes;
 
 #[cfg(windows)]
 mod winhttp;

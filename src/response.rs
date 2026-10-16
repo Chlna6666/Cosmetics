@@ -209,7 +209,10 @@ pub fn overlay(
                     Err(e)=>return Err(format!("official preview file read failed: {e}")),
                 }
             };
-            if add.is_empty() && official_preview_ids.is_empty() {return Ok(None);}
+            let local_items=if rule.name=="dressing_room_capes" {
+                crate::local_capes::items()
+            } else {&[]};
+            if add.is_empty() && local_items.is_empty() && official_preview_ids.is_empty() {return Ok(None);}
             let mut root: Value = serde_json::from_slice(original_body)
                 .map_err(|e| format!("original JSON invalid: {e}"))?;
             let target = root.pointer_mut(&rule.pointer)
@@ -229,7 +232,7 @@ pub fn overlay(
                 if preview_official_cape(item,key,&official_preview_ids) {projected+=1;}
             }
             let mut added=0usize;
-            for item in add {
+            for item in add.iter().chain(local_items.iter()) {
                 let identity=item.get(key).and_then(Value::as_str)
                     .ok_or_else(||format!("overlay item missing string identity {key}"))?;
                 if seen.insert(identity.to_string()) {
@@ -265,7 +268,9 @@ pub fn overlay(
                 format!("catalog request rejected: {reason}"))?;
             let folder = guarded_path(base, &rule.catalog_directory)?;
             let path = folder.join(format!("{id}.json"));
-            let catalog_bytes=match fs::read(&path) {
+            let catalog_bytes=if let Some(bytes)=crate::local_capes::catalog(&id) {
+                bytes.to_vec()
+            } else {match fs::read(&path) {
                 Ok(data)=>data,
                 Err(e) if e.kind()==std::io::ErrorKind::NotFound =>
                     match crate::resources::catalog_json(&id) {
@@ -273,7 +278,7 @@ pub fn overlay(
                         None=>return Ok(None),
                     },
                 Err(e)=>return Err(format!("{}: {e}",path.display())),
-            };
+            }};
             let local: Value = serde_json::from_slice(&catalog_bytes)
                 .map_err(|e| format!("catalog JSON invalid: {e}"))?;
             let file_id = local.pointer("/data/Item/Id").and_then(Value::as_str)

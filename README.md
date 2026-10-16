@@ -1,6 +1,6 @@
 # Cosmetics
 
-Version: **0.1.6**. Two Cosmos CDN-backed cape metadata presets are included,
+Version: **0.1.7**. Two Cosmos CDN-backed cape metadata presets are included,
 with **NotOwned** ownership. Their actual Persona ZIPs are **not embedded**
 or republished. The older manifest-only diagnostic ZIP is still available as
 an opt-in protocol probe.
@@ -297,3 +297,32 @@ Source implementation references:
 - BedrockCosmos.Core/Proxy/ProxyController.cs: OnResponse, HandleEntitlementsRequest
 - BedrockCosmos.Core/App/AsyncHttpOperations.cs: GetCosmosEntitlementsAsync
 - Bedrock-Cosmos/Responses/MainPages/Capes.json
+## v0.1.7 — completely local, standalone cape ZIPs
+
+Put each user-authored ZIP in **`capes/` beside `Cosmetics.dll`**. That's all.
+No separate catalog JSON, `capes_items.json`, Cosmos importer, XBL inventory
+overlay, external CDN or static resource deployment is needed for these packs.
+The DLL scans this folder at game startup. After adding/removing ZIPs, restart.
+
+At minimum a ZIP contains `cape.png` (without nested folders).
+Optionally include `cape.json` with `name`, `author` and fixed `id` (UUID).
+The ZIP can instead contain a prebuilt `persona.zip`, optionally with a
+`cape.png` for the thumbnail. The DLL never extracts these archives to disk.
+
+```powershell
+py scripts/pack_cape.py my_cape.png --name "My Cape" --author "Player"
+```
+
+The helper writes `capes/My Cape.zip` and embeds a tiny `cape.json` automatically.
+Internal game-specific item IDs, catalog JSON, Persona resource URL and PNG
+thumbnail are generated entirely in memory. The older `overrides/` folder is
+unrelated and remains only for compatibility with official/Cosmos workflows.
+
+**Important:** PNG-only ZIPs are converted to an experimental plaintext
+Persona-shaped ZIP (`manifest.json`, `contents.json`, `textures/cape.png`).
+This is a transport prototype: game acceptance and wearing are unverified;
+the game may require more Persona metadata, real signatures or other runtime
+state. A user-supplied valid native `persona.zip` is transmitted unchanged.
+Neither variant grants real Microsoft entitlements or multiplayer visibility.
+
+See [docs/LOCAL_CAPES.md](docs/LOCAL_CAPES.md).

@@ -68,3 +68,13 @@ entry grants server-side ownership.
 - [x] Add read-only opt-in original inventory schema probe
 - [ ] Verify actual game equipment, signatures and persistence after restarting the client
 - [ ] Derive actual inventory schema from consented redacted fixture before any local entitlement overlay
+
+## v0.1.7 standalone cape ZIP pipeline
+- [x] Scan capes/*.zip without adding more cosmetics.json routes
+- [x] Auto-generate stable item/resource UUIDs, catalog JSON and cape page items
+- [x] Serve self-contained virtual thumbnails and Persona-shaped ZIPs
+- [x] Accept optional original native persona.zip without modifying bytes
+- [x] Keep Cosmos/official overrides completely separate
+- [ ] Verify whether 26.40 accepts the experimental PNG-to-Persona payload
+- [ ] Implement validated game-native Persona binary authoring when the real schema is known
+- [ ] Verify selection, equip persistence and multiplayer visibility in-game
