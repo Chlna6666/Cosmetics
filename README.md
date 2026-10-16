@@ -1,6 +1,6 @@
 # Cosmetics
 
-Version: **0.1.2**. Two Cosmos CDN-backed cape metadata presets are included,
+Version: **0.1.3**. Two Cosmos CDN-backed cape metadata presets are included,
 with **NotOwned** ownership. Their actual Persona ZIPs are **not embedded**
 or republished. The older manifest-only diagnostic ZIP is still available as
 an opt-in protocol probe.
@@ -195,3 +195,20 @@ there is a separate rights-confirmed option. Read
 
 **Local metadata is not a server entitlement.** Neither importer nor DLL
 modifies the real inventory, receipts, or Minecraft's existing Persona cache.
+
+## v0.1.3 capture diagnostics
+
+The DLL prints the real Cargo version at startup. Under `logs/cosmetics.log`, every
+recognized commerce request reports a redacted route and whether an overlay was
+actually installed. Unknown commerce paths are grouped into non-sensitive
+endpoint families (query strings and page identifiers never leave the process).
+`Catalog/GetPublishedItem` now recognizes case-insensitive `ItemId`, `Id`
+and selected nested object forms; requests not found in the local catalog still
+pass to the server unchanged. `client_read_complete` confirms the game's
+WinHTTP consumer read the entire synthetic entity, not that Minecraft accepted
+its Persona content.
+
+The PersonaProfile screen now has a dedicated optional navigation tile to
+`DressingRoom_Capes`, integrated using the upstream Cosmos `StoreRow` / dropdown
+0 structure. Disable `persona_profile` in cosmetics.json to suppress it. Existing
+owned items and inventory are not replaced.

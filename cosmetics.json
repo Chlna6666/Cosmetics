@@ -15,14 +15,12 @@
     },
     {
       "name": "persona_profile",
-      "enabled": false,
+      "enabled": true,
       "host": "store.mktpl.minecraft-services.net",
       "method": "GET",
       "path": "/api/v2.0/layout/pages/DressingRoom_PersonaProfile",
-      "mode": "append_array",
-      "pointer": "/result/layout/0/rows",
-      "identity_key": "controlId",
-      "file": "overrides/persona_profile_rows.json"
+      "mode": "persona_profile",
+      "file": "overrides/persona_profile_items.json"
     },
     {
       "name": "custom_skins_selector",

@@ -74,3 +74,16 @@ v0.1.1 会捕获排队的异步请求体，并输出
 
 CI 通过表示 Rust 测试和 Windows DLL 编译成功，不代表游戏内异步回调、
 压缩头解析、官方缓存和 Persona 权益校验通过。
+
+## v0.1.3 debug output
+
+- `version=0.1.3`: actual Cargo-embedded DLL version. The old `v0.1.1-diagnostic` was a hardcoded label and did not prove which DLL was injected.
+- `unmatched commerce request GET store/PersonaCreatorPage_<redacted>`: WinHTTP was used but configured route did not match. Actual query strings/IDs are not logged.
+- `catalog lookup ... body_shape=top_itemid|top_id|nested_id|unknown_fields`: detects PlayFab field-name variants without writing the values or auth tokens.
+- `headers ... status=Some(200) ... encoding=br`: a target response was received. It may remain unmodified.
+- `action=replace_json ... replacement_bytes=N`: overlay engine created a replacement entity.
+- `action=client_read_complete ... delivered_bytes=N`: Minecraft's WinHTTP client consumed the generated entity.
+- `action=passthrough reason=overlay_error`: original data retained.
+- `persona_profile`: a Cosmos-style navigation tile into DressingRoom_Capes, only when the original StoreRow and dropdownId 0 are present. On unknown page structure, leaves the original response unchanged.
+
+If the packaged `cosmetics.json` was not updated, older local rules take precedence and the new profile overlay remains disabled. Replace config along with DLL for this test.

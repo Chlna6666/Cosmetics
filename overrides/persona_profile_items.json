@@ -1,0 +1,41 @@
+[
+  {
+    "id": "00000000-0000-0000-0000-00000000cace",
+    "linksTo": "DressingRoom_Capes",
+    "linksToInfo": {
+      "linksTo": "DressingRoom_Capes",
+      "linkType": "pageId",
+      "displayType": "store_layout.character_creator_screen",
+      "navigateInPlace": false
+    },
+    "thumbnailPreviewOnly": true,
+    "contentType": "PersonaDurable",
+    "title": "Cosmetics Capes",
+    "creatorName": "Cosmetics",
+    "pieceType": "persona_capes",
+    "rarity": "common",
+    "ownership": "NotOwned",
+    "packType": "Persona",
+    "thumbnail": {
+      "tag": "Thumbnail",
+      "type": "Thumbnail",
+      "url": "https://capes.bedrock-cosmos.app/icons/AndroidCape.png",
+      "urlWithResolution": "https://capes.bedrock-cosmos.app/icons/AndroidCape.png"
+    },
+    "packIdentity": [
+      {
+        "type": "persona_piece",
+        "uuid": "4a48472c-2256-41db-9b96-790276e84fc1",
+        "version": "1.0.0"
+      }
+    ],
+    "namedLinksToInfoMap": {
+      "dr.persona_creator_page": {
+        "linksTo": "DressingRoom_Capes",
+        "linkType": "external",
+        "displayType": "store_layout.character_creator_screen",
+        "navigateInPlace": false
+      }
+    }
+  }
+]

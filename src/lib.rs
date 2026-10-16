@@ -1,6 +1,7 @@
 //! Standalone native DLL: no BLoader dependency or Minecraft internal symbols.
 //! The response engine can be tested on any platform; hooks are Windows-only.
 pub mod response;
+pub mod diagnostics;
 pub mod codec;
 pub mod persona;
 pub mod resources;

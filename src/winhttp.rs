@@ -1,7 +1,7 @@
 //! Native WinHTTP responses: bounded sync buffering, async callback capture,
 //! and opt-in virtual local Persona ZIP resources. No TLS interception and no BLoader.
 use crate::response::{Config, Mode};
-use crate::{codec, persona};
+use crate::{codec, persona, diagnostics};
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::fs::{self, File, OpenOptions};
@@ -138,6 +138,7 @@ struct Replay {
     zip: bool,
     strip_encoding: bool,
     status: u32,
+    delivery_logged: bool,
 }
 static TABLES: OnceLock<Mutex<Tables>> = OnceLock::new();
 fn tables() -> &'static Mutex<Tables> {
@@ -172,14 +173,15 @@ unsafe extern "system" fn worker(module: H) -> u32 {
     let log = match OpenOptions::new().create(true).append(true)
         .open(root.join("logs").join("cosmetics.log")) { Ok(f) => f, Err(_) => return 5 };
     let _ = RUNTIME.set(Runtime { cfg, root, log: Mutex::new(log) });
-    logger("Cosmetics v0.1.1-diagnostic; independent WinHTTP module; fail-open enabled");
+    logger(&format!("Cosmetics version={} profile=diagnostic, module=WinHTTP, fail_open=true",
+        env!("CARGO_PKG_VERSION")));
     logger(&format!("loaded rules={}; enabled={}; diagnostics=redacted",RUNTIME.get().unwrap().cfg.rules.len(),
         RUNTIME.get().unwrap().cfg.rules.iter().filter(|r|r.enabled).count()));
     if let Err(e) = install() {
         logger(&format!("hook install failed; game remains unmodified: {e}"));
         return 6;
     }
-    logger("WinHTTP hooks installed; open the Dressing Room capes page to see a route match");
+    logger("WinHTTP hooks installed; telemetry=request-route,response-header,overlay-decision,client-read");
     0
 }
 
@@ -277,6 +279,8 @@ unsafe extern "system" fn on_open_request(
         );
         let is_commerce_host=RUNTIME.get().is_some_and(|rt|
             rt.cfg.rules.iter().any(|rule|rule.host.eq_ignore_ascii_case(&host)));
+        let (host_for_diagnostics,path_for_diagnostics,method_for_diagnostics)=
+            (host.clone(),path.clone(),method.clone());
         let req = Request {
             id, diagnostic_route: diagnostic_route.clone(), catalog_checked:false,
             body_overflow:false, host, path, method,
@@ -290,12 +294,9 @@ unsafe extern "system" fn on_open_request(
         drop(state);
         if let Some(name)=diagnostic_route {
             logger(&format!("request #{id}: route matched {name}; async={async_session}"));
-        } else if RUNTIME.get().is_some() {
-            // Never write raw paths, query values, tokens, accounts or URLs.
-            // This safely distinguishes an endpoint mismatch from no WinHTTP traffic.
-            if is_commerce_host {
-                logger(&format!("request #{id}: commerce host observed but path/verb not matched"));
-            }
+        } else if is_commerce_host {
+            let route=diagnostics::route_label(&host_for_diagnostics,&path_for_diagnostics,&method_for_diagnostics);
+            logger(&format!("request #{id}: unmatched commerce request {route}; async={async_session}; action=passthrough"));
         }
     }
     h
@@ -350,7 +351,9 @@ unsafe fn catalog_fast_response(h:H)->bool {
     };
     let (id,rule,body,overflow)=found;
     let structure=crate::response::catalog_request_state(&body);
-    logger(&format!("request #{id}: catalog lookup {} body_bytes={} body_state={structure} overflow={overflow}",rule.name,body.len()));
+    let shape=diagnostics::catalog_shape(&body);
+    logger(&format!("request #{id}: catalog lookup={} body_bytes={} body_state={structure} body_shape={shape} overflow={overflow}",
+        rule.name,body.len()));
     if overflow {return false;}
     // CatalogItem should only replace a registered local ID. Unknown official
     // item requests stay on the official PlayFab response path.
@@ -363,7 +366,7 @@ unsafe fn catalog_fast_response(h:H)->bool {
             let mut state=tables().lock().unwrap_or_else(|e|e.into_inner());
             if let Some(r)=state.requests.get_mut(&state_key(h)){
                 r.replay=Some(Replay{bytes,position:0,complete:true,replaced:true,
-                    catalog:true,zip:false,strip_encoding:false,status:200});
+                    catalog:true,zip:false,strip_encoding:false,status:200,delivery_logged:false});
             }
             logger(&format!("request #{id}: catalog local response applied ({})",rule.name));
             true
@@ -431,7 +434,7 @@ unsafe extern "system" fn on_send(
             if let Some(r)=state.requests.get_mut(&state_key(h)) {
                 r.synthetic=true;r.status=status;r.callback_context=ctx;
                 r.replay=Some(Replay{bytes:data,position:0,complete:true,replaced:true,
-                    catalog:false,zip:true,strip_encoding:false,status});
+                    catalog:false,zip:true,strip_encoding:false,status,delivery_logged:false});
             }
         }
         if async_request {notify_game(h,ctx,STATUS_SEND_COMPLETE,ptr::null_mut(),0);}
@@ -504,7 +507,7 @@ unsafe fn begin_async_capture(h:H,context:usize)->bool {
         let Some(req)=state.requests.get(&state_key(h)) else{return false};
         if !req.async_session{return false;}
         let Some(rule)=runtime.cfg.match_rule(&req.host,&req.path,&req.method) else{return false};
-        if rule.mode!=Mode::AppendArray {return false;}
+        if !matches!(rule.mode,Mode::AppendArray|Mode::PersonaProfile) {return false;}
         rule
     };
     let status=query_number(h,QUERY_STATUS_CODE);
@@ -530,7 +533,9 @@ unsafe fn begin_async_capture(h:H,context:usize)->bool {
             limit:max,encoding,pumping:false,needs_read:true
         });
     }
-    logger(&format!("{}: async prefetch started",rule.name));
+    let route_name=rule.name.clone();
+    logger(&format!("route={route_name}: async prefetch started"));
+
     pump_async(h);
     true
 }
@@ -583,20 +588,24 @@ unsafe fn finish_async(h:H,completed:bool) {
     let rule=runtime.cfg.match_rule(&host,&path,&method);
     let mut replay=Replay{
         bytes:original,position:0,complete:completed,replaced:false,catalog:false,zip:false,
-        strip_encoding:false,status:200
+        strip_encoding:false,status:200,delivery_logged:false
     };
     if completed {
         if let Some(rule)=rule {
             match codec::rewrite(&runtime.root,&rule,&body,&replay.bytes,encoding,
                 runtime.cfg.max_capture_bytes.clamp(1024,16*1024*1024)) {
                 Ok(Some(change)) => {
+                    let original_len=replay.bytes.len();
+                    let replacement_len=change.body.len();
+                    let strip_encoding=change.strip_encoding;
                     replay.bytes=change.body;
                     replay.replaced=true;
-                    replay.strip_encoding=change.strip_encoding;
-                    logger(&format!("{}: async response overlay applied",rule.name));
+                    replay.strip_encoding=strip_encoding;
+                    logger(&format!("route={}: action=replace_json async=true original_bytes={original_len} replacement_bytes={replacement_len} encoding_removed={strip_encoding}",
+                        rule.name));
                 }
-                Ok(None)=>logger(&format!("{}: async response unchanged",rule.name)),
-                Err(e)=>logger(&format!("{}: async overlay failed; original kept ({e})",rule.name)),
+                Ok(None)=>logger(&format!("route={}: action=passthrough reason=no_changes",rule.name)),
+                Err(e)=>logger(&format!("route={}: action=passthrough reason=overlay_error ({e})",rule.name)),
             }
         }
     }
@@ -614,7 +623,15 @@ unsafe extern "system" fn status_bridge(h:H,context:usize,status:u32,info:H,len:
                 r.diagnostic_route.as_ref().map(|route|(r.id,route.clone(),r.async_session)))
         };
         if let Some((id,route,asynchronous))=note {
-            logger(&format!("request #{id}: response headers callback {route}; async={asynchronous}"));
+            let code=query_number(h,QUERY_STATUS_CODE);
+            let content_length=query_number(h,QUERY_CONTENT_LENGTH);
+            let encoding=query_string(h,QUERY_CONTENT_ENCODING).unwrap_or_else(||"identity/unknown".into());
+            // Only log a fixed set of known Content-Encoding values.
+            let encoding_name=match encoding.to_ascii_lowercase().as_str() {
+                "gzip"=>"gzip","br"=>"br","deflate"=>"deflate",
+                "identity"=>"identity",_=>"other/unknown"
+            };
+            logger(&format!("request #{id}: headers route={route} async={asynchronous} status={code:?} content_length={content_length:?} encoding={encoding_name}"));
         }
         if catalog_fast_response(h) {
             invoke_headers(h,context);
@@ -678,7 +695,7 @@ unsafe extern "system" fn on_receive(h:H,reserved:H)->B {
             r.diagnostic_route.as_ref().map(|route|(r.id,route.clone(),r.async_session)))
     };
     if let Some((id,route,asynchronous))=note {
-        logger(&format!("request #{id}: WinHttpReceiveResponse ok; route={route}; async={asynchronous}"));
+        logger(&format!("request #{id}: receive_response route={route} async={asynchronous} status={:?}",query_number(h,QUERY_STATUS_CODE)));
     }
     if catalog_fast_response(h) {return ok;}
     let (rule,body)={
@@ -718,16 +735,19 @@ unsafe extern "system" fn on_receive(h:H,reserved:H)->B {
         raw.extend_from_slice(&temp[..bytes as usize]);
     }
     let mut replay=Replay {bytes:raw,position:0,complete:completed,replaced:false,
-        catalog:false,zip:false,strip_encoding:false,status:200};
+        catalog:false,zip:false,strip_encoding:false,status:200,delivery_logged:false};
     if completed && replay.bytes.len()<=limit {
         match codec::rewrite(&rt.root,&rule,&body,&replay.bytes,encoding,limit) {
             Ok(Some(change)) => {
+                let original_len=replay.bytes.len();
+                let replacement_len=change.body.len();
+                let strip_encoding=change.strip_encoding;
                 replay.bytes=change.body;
-                replay.replaced=true;replay.strip_encoding=change.strip_encoding;
-                logger(&format!("{}: synchronous JSON overlay applied",rule.name));
+                replay.replaced=true;replay.strip_encoding=strip_encoding;
+                logger(&format!("route={}: action=replace_json async=false original_bytes={original_len} replacement_bytes={replacement_len} encoding_removed={strip_encoding}",rule.name));
             }
-            Ok(None)=>logger(&format!("{}: no local additions",rule.name)),
-            Err(e)=>logger(&format!("{}: overlay failed, replay original ({e})",rule.name)),
+            Ok(None)=>logger(&format!("route={}: action=passthrough reason=no_changes",rule.name)),
+            Err(e)=>logger(&format!("route={}: action=passthrough reason=overlay_error ({e})",rule.name)),
         }
     } else {
         logger(&format!("{}: response not completely buffered; replay original data",rule.name));
@@ -751,12 +771,20 @@ unsafe extern "system" fn on_read(h:H,buffer:H,cap:u32,out:*mut u32)->B {
                     ptr::copy_nonoverlapping(rep.bytes.as_ptr().add(rep.position),buffer as *mut u8,length);
                 }
                 rep.position+=length;
-                Some((length as u32,async_req,ctx))
+                let completion=if rep.replaced && !rep.delivery_logged
+                    && rep.position==rep.bytes.len(){
+                    rep.delivery_logged=true;
+                    Some((req.id,req.diagnostic_route.clone().unwrap_or_else(||"persona_resource".into()),rep.bytes.len()))
+                } else {None};
+                Some((length as u32,async_req,ctx,completion))
             })
         })
     };
-    if let Some((count,async_req,ctx))=response {
+    if let Some((count,async_req,ctx,completion))=response {
         if !out.is_null() {*out=count;}
+        if let Some((id,route,delivered))=completion {
+            logger(&format!("request #{id}: route={route} action=client_read_complete delivered_bytes={delivered}"));
+        }
         if async_req {notify_game(h,ctx,STATUS_READ,buffer,count);}
         return 1;
     }
