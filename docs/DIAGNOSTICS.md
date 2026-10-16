@@ -182,3 +182,18 @@ If the packaged `cosmetics.json` was not updated, older local rules take precede
 ## v0.1.11 页面分类
 
 官方 `Official Capes - Catalog Only`、第三方 `Cosmos & Community Capes`、个人 `My Local ZIP Capes` 是同一 `DressingRoom_Capes` 响应里的不同 `GridList`，按实际数据动态出现。每个追加区域复用当前服务端页面中的 GridList/Preview 组件，原始 `Owned` 与其他原版栏目保留。若无法找到正确 GridList 模板，原响应会按 fail-open 原样保留。分类不改变账户权益。
+
+## v0.1.13 — 高分辨率和商品死锁
+
+1. 已修复 `catalog_fast_response` 日志在持有 `tables` Mutex 时再次加锁造成的死锁。
+2. 已知本地商品 ID 不再发送给 PlayFab；WinHTTP 直接返回虚拟 HTTP 200。
+3. `CAPE_REGISTERED` 输出每件披风贴图的分辨率、来源和实验性质。
+4. 支持 64x32、128x64、256x128、512x256 等成比例 PNG，并原样存入资源。
+5. 128x128 等非标准披风 UV 尺寸会报 `invalid cape UV dimensions`。
+
+诊断点击链路时依次看：
+`LOCAL_CATALOG_SYNTHETIC`、`client_read_complete`、
+`LOCAL_ASSET_REQUEST`、`LOCAL_ASSET_RESPONSE_READY`、`client_read_complete`。
+如果只是服务端 400 且没有 `LOCAL_CATALOG_SYNTHETIC`，说明该请求不属于
+当前 DLL 已注册的本地商品 ID（或请求体没有完整捕获）。
+HTTP 资源送达仍不代表 Minecraft Persona 验证或装备成功。

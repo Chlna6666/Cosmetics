@@ -196,6 +196,7 @@ struct PreparedCape {
     catalog:Vec<u8>,
     assets:Vec<(String,LocalAsset)>,
     native:bool,
+    dimensions:Option<(u32,u32)>,
 }
 fn version_parts(version:&str)->Result<[u32;3],String>{
     let parts:Vec<_>=version.split('.').collect();
@@ -299,7 +300,12 @@ impl Registry {
                         continue;
                     }
                     total+=bytes;
-                    for entry in entries {
+                    for (index,entry) in entries.into_iter().enumerate() {
+                        let size=entry.dimensions.map_or("none".to_string(),|(w,h)|
+                            format!("{w}x{h} scale={}x",w/64));
+                        reg.diagnostics.push(format!(
+                            "CAPE_REGISTERED {label} index={} texture={} payload={} game_accepted=UNVERIFIED",
+                            index+1,size,if entry.native{"native_persona"}else{"experimental_plaintext"}));
                         item_ids.insert(entry.id.clone());
                         reg.catalogs.insert(entry.id,entry.catalog);
                         for (path,asset) in entry.assets {
@@ -429,9 +435,16 @@ impl Registry {
         original:Option<Vec<u8>>,version_text:&str,version:[u32;3],multi:bool)
         ->Result<PreparedCape,String>{
         if !name_ok(&name)||!name_ok(author){return Err("invalid cape name or author".into());}
-        let thumbnail=png.as_ref().map(|data|
-            validate_png(data).and_then(|image|make_thumbnail(&image))).transpose()?;
+        let decoded=png.as_ref().map(|data|validate_png(data)).transpose()?;
+        let dimensions=decoded.as_ref().map(|img|img.dimensions());
         let native=original.is_some();
+        if !native {
+            let (w,h)=dimensions.ok_or("PNG-only cape needs a texture")?;
+            if w%64!=0 || h%32!=0 || w/64!=h/32 {
+                return Err(format!("invalid cape UV dimensions {w}x{h}; expected 64x32, 128x64, 256x128, 512x256 or another 64x32 multiple"));
+            }
+        }
+        let thumbnail=decoded.as_ref().map(make_thumbnail).transpose()?;
         let old_resource_id=uuid_from(item_id.as_bytes(),"resource");
         let resource_id=if multi{
             // Keep item identity stable; explicit package version changes
@@ -480,7 +493,7 @@ impl Registry {
             assets.push((thumbnail_path,LocalAsset{data:bytes,kind:AssetType::Png}));
         }
         Ok(PreparedCape{id:item_id,item,catalog:serde_json::to_vec(&catalog)
-            .map_err(|e|e.to_string())?,assets,native})
+            .map_err(|e|e.to_string())?,assets,native,dimensions})
     }
 }
 
@@ -696,6 +709,56 @@ mod tests{
         assert_eq!(version_parts("1.2.3").unwrap(),[1,2,3]);
         assert!(version_parts("1.2").is_err());
         assert!(version_parts("1.2.999999").is_err());
+    }
+    #[test] fn high_resolution_png_uv_is_preserved_in_generated_persona_zip(){
+        for (scale,w,h) in [(2,128,64),(4,256,128),(8,512,256)]{
+            let root=std::env::temp_dir().join(format!(
+                "cosmetics_hires_{}_{}",std::process::id(),scale));
+            let _=fs::remove_dir_all(&root);
+            fs::create_dir_all(root.join("capes")).unwrap();
+            let mut image=RgbaImage::from_pixel(w,h,Rgba([0,0,0,0]));
+            for y in scale..17*scale{
+                for x in 12*scale..22*scale {image.put_pixel(x,y,Rgba([200,50,80,255]));}
+            }
+            let mut encoded=Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgba8(image)
+                .write_to(&mut encoded,ImageFormat::Png).unwrap();
+            let mut outer=ZipWriter::new(File::create(root.join("capes/hires.zip")).unwrap());
+            outer.start_file("cape.png",SimpleFileOptions::default()).unwrap();
+            outer.write_all(encoded.get_ref()).unwrap();
+            outer.finish().unwrap();
+            let reg=Registry::scan(&root);
+            assert_eq!(reg.accepted,1,"{:?}",reg.diagnostics);
+            assert_eq!(reg.plaintext_experimental_payloads,1);
+            let data=reg.assets.values().find(|v|v.kind==AssetType::PersonaZip).unwrap();
+            let mut inner=ZipArchive::new(Cursor::new(&data.data)).unwrap();
+            let mut original=Vec::new();
+            inner.by_name("textures/cape.png").unwrap()
+                .read_to_end(&mut original).unwrap();
+            let decoded=validate_png(&original).unwrap();
+            assert_eq!(decoded.dimensions(),(w,h));
+            assert!(reg.diagnostics.iter().any(|line|
+                line.contains(&format!("texture={w}x{h}"))));
+            let _=fs::remove_dir_all(root);
+        }
+    }
+    #[test] fn non_cape_aspect_ratio_is_rejected_with_diagnostic(){
+        let root=std::env::temp_dir().join(format!("cosmetics_wrong_uv_{}",std::process::id()));
+        let _=fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("capes")).unwrap();
+        let image=RgbaImage::from_pixel(128,128,Rgba([255,20,20,255]));
+        let mut bytes=Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(&mut bytes,ImageFormat::Png).unwrap();
+        let mut zip=ZipWriter::new(File::create(root.join("capes/wrong.zip")).unwrap());
+        zip.start_file("cape.png",SimpleFileOptions::default()).unwrap();
+        zip.write_all(bytes.get_ref()).unwrap();
+        zip.finish().unwrap();
+        let reg=Registry::scan(&root);
+        assert_eq!(reg.rejected,1);
+        assert_eq!(reg.items.len(),0);
+        assert!(reg.diagnostics.iter().any(|x|x.contains("invalid cape UV dimensions 128x128")));
+        let _=fs::remove_dir_all(root);
     }
     #[test] fn cape_png_requires_png_signature(){
         assert!(validate_png(b"GIF89a").is_err());

@@ -1,6 +1,6 @@
 # Cosmetics
 
-Version: **0.1.12**. Two Cosmos CDN-backed cape metadata presets are included,
+Version: **0.1.13**. Two Cosmos CDN-backed cape metadata presets are included,
 with **NotOwned** ownership. Their actual Persona ZIPs are **not embedded**
 or republished. The older manifest-only diagnostic ZIP is still available as
 an opt-in protocol probe.
@@ -516,3 +516,30 @@ registration when one cape is invalid. Logs report validated ZIP count
 separately from registered cape count. The older Cosmos overrides
 remain independent. Optional `persona_zip` is passed through unchanged;
 plain PNG-generated Persona assets are experimental and may not equip.
+
+## v0.1.13 — Local cape catalog deadlock and high-resolution UV diagnostics
+
+Root cause discovered in `catalog_fast_response`: successful catalog overlays
+attempted to acquire the request-state Mutex for logging while holding the
+same non-reentrant Mutex. This could hang the WinHTTP response callback
+immediately after a `valid_itemid` log.
+
+Registered `capes/*.zip` local product IDs now receive a **synthetic HTTP 200**
+directly in `WinHttpSendRequest` when their POST body is complete. The real
+PlayFab service is not asked for a nonexistent local item (previously HTTP 400).
+Unknown official requests and incomplete streaming bodies continue untouched.
+The fallback catalog replay also releases its mutex before diagnostics, and
+the synthetic response exposes consistent HTTP status/content-length/type,
+raw status line and no stale compression/transfer-encoding headers.
+
+High-resolution cape textures at 64x32 times an integer scale are accepted
+without downsizing: 128x64, 256x128, 512x256 and up to the 2048 pixel limits.
+A PNG-only cape with a non-cape UV shape is rejected with an explicit
+`invalid cape UV dimensions` diagnostic instead of being called validated.
+The game log now reports dimensions per registered cape and whether its
+asset is native Persona or an experimental plaintext payload.
+
+**Remaining limitation:** loading a PNG into the experimental plaintext
+Persona-shaped ZIP does NOT mean that Minecraft accepts its proprietary
+Persona resource format or allows it to be equipped. The 26.40 game-side
+resource/equipment checks must be verified separately after HTTP delivery.

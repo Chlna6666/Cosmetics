@@ -116,3 +116,14 @@ entry grants server-side ownership.
 - [x] Authoring utility pack_capes.py
 - [ ] Verify client-side cache reuse over multiple Minecraft launches
 - [ ] Verify native game Persona equip of authored unsigned textures
+
+
+## v0.1.13 HTTP catalog and high-res UV
+- [x] Remove self-deadlock in catalog_fast_response replay logging
+- [x] Bypass upstream PlayFab for known local product IDs with synthetic HTTP 200
+- [x] Keep synthetic status/raw headers/encoding consistent
+- [x] Verify 128x64, 256x128 and 512x256 PNG are preserved
+- [x] Reject invalid cape UV aspect ratios with explicit dimensions
+- [x] Report dimensions per locally registered cape
+- [ ] Confirm game-side Persona parsing and equipment after catalog/resource delivery
+- [ ] Validate callback/WinHTTP behavior on real Minecraft Bedrock 26.40

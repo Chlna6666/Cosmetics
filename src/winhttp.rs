@@ -436,6 +436,17 @@ unsafe extern "system" fn on_set_callback(h:H,callback:H,flags:u32,reserved:usiz
 unsafe fn invoke_headers(h:H,context:usize) {
     notify_game(h,context,STATUS_HEADERS,ptr::null_mut(),0);
 }
+fn eligible_local_catalog(
+    body:&[u8],declared_len:usize,overflow:bool,max_bytes:usize,
+    lookup:impl FnOnce(&str)->Option<Vec<u8>>,
+)->Option<Vec<u8>> {
+    if overflow || declared_len==0 || body.len()!=declared_len{return None;}
+    let id=crate::response::catalog_id(body).ok()?;
+    let data=lookup(&id)?;
+    if data.is_empty() || data.len()>max_bytes{return None;}
+    Some(data)
+}
+
 unsafe fn catalog_fast_response(h:H)->bool {
     let Some(runtime)=RUNTIME.get() else{return false};
     // Never diagnose the same item twice (ReceiveResponse and HEADERS callback).
@@ -465,15 +476,20 @@ unsafe fn catalog_fast_response(h:H)->bool {
     }
     match crate::response::overlay(&runtime.root,&rule,&body,b"") {
         Ok(Some(bytes)) if bytes.len()<=runtime.cfg.max_capture_bytes => {
-            let mut state=tables().lock().unwrap_or_else(|e|e.into_inner());
-            if let Some(r)=state.requests.get_mut(&state_key(h)){
-                r.replay=Some(Replay{bytes,position:0,complete:true,replaced:true,
-                    catalog:true,zip:false,png:false,strip_encoding:false,status:200,delivery_logged:false});
-            }
-            logger(&format!("request #{id}: CATALOG_RESPONSE_READY source={} route={} bytes={}",
-                if is_local {"local_zip"}else{"legacy_or_cosmos"},rule.name,
-                tables().lock().unwrap_or_else(|e|e.into_inner()).requests.get(&state_key(h))
-                    .and_then(|r|r.replay.as_ref()).map_or(0,|r|r.bytes.len())));
+            // Do not lock tables recursively: a previous diagnostic tried to
+            // reacquire this same non-reentrant Mutex, freezing the game.
+            let byte_count=bytes.len();
+            let registered={
+                let mut state=tables().lock().unwrap_or_else(|e|e.into_inner());
+                if let Some(r)=state.requests.get_mut(&state_key(h)){
+                    r.replay=Some(Replay{bytes,position:0,complete:true,replaced:true,
+                        catalog:true,zip:false,png:false,strip_encoding:true,status:200,delivery_logged:false});
+                    true
+                }else{false}
+            };
+            if !registered {return false;}
+            logger(&format!("request #{id}: CATALOG_RESPONSE_READY source={} route={} bytes={byte_count}",
+                if is_local {"local_zip"}else{"legacy_or_cosmos"},rule.name));
             debug_log(&format!("request #{id}: CATALOG_RESPONSE_REPLACED source={} (not an equip success)",
                 if is_local {"local_zip"}else{"legacy_or_cosmos"}));
             true
@@ -564,6 +580,46 @@ unsafe extern "system" fn on_send(
                 .and_then(|r|r.replay.as_ref()).map_or(0,|r|r.bytes.len())));
         if async_request {notify_game(h,ctx,STATUS_SEND_COMPLETE,ptr::null_mut(),0);}
         return 1;
+    }
+    // A registered local cape is not a PlayFab product. Avoid issuing a
+    // guaranteed 400 to the remote server: serve its known catalog metadata
+    // as a synthetic WinHTTP response, just like a virtual Persona ZIP.
+    // Unknown IDs and incomplete/streaming POST bodies use normal WinHTTP.
+    let candidate={
+        let state=tables().lock().unwrap_or_else(|e|e.into_inner());
+        state.requests.get(&state_key(h)).and_then(|req|{
+            let rule=RUNTIME.get()?.cfg.match_rule(&req.host,&req.path,&req.method)?;
+            (rule.mode==Mode::CatalogItem).then(||(
+                req.id,req.async_session,req.request_body.clone(),req.body_overflow
+            ))
+        })
+    };
+    if let Some((request_id,async_request,body,overflow))=candidate {
+        let max=RUNTIME.get().map_or(4*1024*1024,|r|r.cfg.max_capture_bytes);
+        if let Some(bytes)=eligible_local_catalog(&body,total_len as usize,overflow,max,
+            |id|local_capes::catalog(id).map(ToOwned::to_owned)){
+            let byte_count=bytes.len();
+            let stored={
+                let mut state=tables().lock().unwrap_or_else(|e|e.into_inner());
+                if let Some(req)=state.requests.get_mut(&state_key(h)){
+                    req.synthetic=true;
+                    req.catalog_checked=true;
+                    req.status=200;
+                    req.callback_context=ctx;
+                    req.replay=Some(Replay{bytes,position:0,complete:true,replaced:true,
+                        catalog:true,zip:false,png:false,strip_encoding:true,status:200,
+                        delivery_logged:false});
+                    true
+                }else{false}
+            };
+            if stored{
+                logger(&format!("request #{request_id}: LOCAL_CATALOG_SYNTHETIC status=200 bytes={byte_count} upstream_request=skipped async={async_request}"));
+                if async_request{
+                    notify_game(h,ctx,STATUS_SEND_COMPLETE,ptr::null_mut(),0);
+                }
+                return 1;
+            }
+        }
     }
     if let Some(r)=tables().lock().unwrap_or_else(|e|e.into_inner())
         .requests.get_mut(&state_key(h)){r.callback_context=ctx;}
@@ -1023,18 +1079,18 @@ unsafe extern "system" fn on_headers(
             if code==QUERY_CONTENT_TYPE {
                 return synthetic_header(query,buffer,length,content_type);
             }
-            if rep.zip || rep.png || rep.strip_encoding {
+            if rep.zip || rep.png || rep.catalog || rep.strip_encoding {
                 if matches!(code, QUERY_CONTENT_ENCODING|QUERY_TRANSFER_ENCODING) {
                     SetLastError(ERROR_WINHTTP_HEADER_NOT_FOUND);
                     return 0;
                 }
             }
-            if code==QUERY_RAW_HEADERS_CRLF && (rep.zip || rep.png) {
+            if code==QUERY_RAW_HEADERS_CRLF && (rep.zip || rep.png || rep.catalog) {
                 let raw=format!("HTTP/1.1 {} OK\r\nContent-Type: {}\r\nContent-Length: {}\r\n\r\n",
                     rep.status,content_type,size);
                 return synthetic_header(query,buffer,length,&raw);
             }
-            if code==QUERY_RAW_HEADERS && (rep.zip || rep.png) {
+            if code==QUERY_RAW_HEADERS && (rep.zip || rep.png || rep.catalog) {
                 // This is a MULTI_SZ response.
                 let raw=format!("HTTP/1.1 {} OK\0Content-Type: {}\0Content-Length: {}\0\0",
                     rep.status,content_type,size);
@@ -1081,6 +1137,23 @@ unsafe extern "system" fn on_close(h:H)->B {
 #[cfg(test)]
 mod isolation_tests {
     use super::*;
+    #[test]
+    fn only_complete_known_local_catalog_requests_are_synthesized(){
+        let id="11111111-2222-4333-8444-555555555555";
+        let request=format!(r#"{{"ItemId":"{id}"}}"#);
+        let data=br#"{"data":{"Item":{"Id":"local"}}}"#.to_vec();
+        let good=eligible_local_catalog(request.as_bytes(),request.len(),false,4096,
+            |found|if found==id {Some(data.clone())}else{None});
+        assert_eq!(good,Some(data.clone()));
+        assert!(eligible_local_catalog(request.as_bytes(),request.len()+1,false,4096,
+            |_|Some(data.clone())).is_none());
+        assert!(eligible_local_catalog(request.as_bytes(),request.len(),true,4096,
+            |_|Some(data.clone())).is_none());
+        assert!(eligible_local_catalog(request.as_bytes(),request.len(),false,2,
+            |_|Some(data.clone())).is_none());
+        assert!(eligible_local_catalog(request.as_bytes(),request.len(),false,4096,
+            |_|None).is_none());
+    }
     #[test]
     fn disabled_marketplace_routes_are_never_intercepted(){
         let cfg:Config=serde_json::from_str(r#"{
