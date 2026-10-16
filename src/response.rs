@@ -543,9 +543,15 @@ mod tests {
         rule.name="dressing_room_capes".into();
         rule.file="overrides/capes_items.json".into();
         rule.pointer="/result/layout/0/rows/0/components/0/items".into();
-        let original=br#"{"result":{"layout":[{"rows":[{"components":[{"type":"itemListComp","items":[],"totalItems":0}]}]}]}}"#;
+        let original=br#"{"result":{"layout":[{"rows":[{"controlId":"GridList","components":[{"type":"headerComp","text":{"value":"Owned","replacements":[]}},{"type":"itemListComp","items":[],"totalItems":0,"customStoreRowConfiguration":{"maxOffers":0,"visibleOffersPerRow":6}},{"type":"dispPreviewPieceComp"}]}]}]}}"#;
         let result:Value=serde_json::from_slice(&overlay(&dir,&rule,b"",original).unwrap().unwrap()).unwrap();
-        assert_eq!(result["result"]["layout"][0]["rows"][0]["components"][0]["totalItems"],2);
+        let rows=result.pointer("/result/layout/0/rows").unwrap().as_array().unwrap();
+        assert_eq!(rows.len(),3);
+        assert_eq!(rows[0]["components"][1]["totalItems"],0);
+        assert_eq!(rows[1]["components"][0]["text"]["value"],"Official Capes - Catalog Only (1)");
+        assert_eq!(rows[1]["components"][1]["items"][0]["title"],"Minecon 2011 Cape (Cosmos)");
+        assert_eq!(rows[2]["components"][0]["text"]["value"],"Cosmos & Community Capes (1)");
+        assert_eq!(rows[2]["components"][1]["items"][0]["title"],"Android Cape (Cosmos)");
         rule.mode=Mode::CatalogItem;
         rule.catalog_directory="overrides/catalog".into();
         let request=br#"{"itemid":"5bba5540-377b-4ec2-9633-4551c4e82e37"}"#;
