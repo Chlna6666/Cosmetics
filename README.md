@@ -1,6 +1,6 @@
 # Cosmetics
 
-Version: **0.1.8**. Two Cosmos CDN-backed cape metadata presets are included,
+Version: **0.1.9**. Two Cosmos CDN-backed cape metadata presets are included,
 with **NotOwned** ownership. Their actual Persona ZIPs are **not embedded**
 or republished. The older manifest-only diagnostic ZIP is still available as
 an opt-in protocol probe.
@@ -361,3 +361,27 @@ look for `DressingRoom_Capes` response modification and local resource requests.
 
 Even if marketplace authorization is restored, a generated plaintext Persona
 ZIP is experimental and may still be rejected by the game.
+
+## v0.1.9 — unambiguous A/B local-only test
+
+Two configuration profiles are included in the Windows ZIP artifact:
+
+- `cosmetics.safe-mode.json` — root `enabled=false`, WinHTTP hooks are never installed.
+- `cosmetics.local-only.json` — ONLY the two required route hooks, with
+  `local_only=true`. `DressingRoom_Capes` appends only memory-registered
+  `capes/*.zip` products; `GetPublishedItem` recognizes only local ZIP IDs.
+  Neither rule reads imported Cosmos catalog files, ownership allowlists,
+  or built-in Cosmos product presets.
+
+Back up `cosmetics.json`, then copy ONE profile to `cosmetics.json`, close
+Minecraft completely, and relaunch. `rule=... local_only=true` in the log
+confirms the minimal profile. If the only observed requests are
+`Catalog/Search (disabled)` or unmatched requests, the game has not issued
+the wardrobe/catalog requests and it is impossible for a page overlay to
+appear. A previous 401 from PlayFab is an upstream authorization response
+and must be diagnosed independently; do not rewrite it to a synthetic 200.
+
+IMPORTANT: even in local-only mode, the local cape *appearance in Minecraft*
+still depends on the game requesting the `DressingRoom_Capes` page and
+successfully parsing the returned response; no native wardrobe-internal
+injection has been implemented.

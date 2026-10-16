@@ -210,8 +210,8 @@ unsafe extern "system" fn worker(module: H) -> u32 {
         RUNTIME.get().unwrap().cfg.rules.len(),
         RUNTIME.get().unwrap().cfg.rules.iter().filter(|r|r.enabled).count()));
     for rule in &RUNTIME.get().unwrap().cfg.rules {
-        logger(&format!("rule={} enabled={} method={} mode={:?}",
-            rule.name,rule.enabled,rule.method,rule.mode));
+        logger(&format!("rule={} enabled={} method={} mode={:?} local_only={}",
+            rule.name,rule.enabled,rule.method,rule.mode,rule.local_only));
     }
     if !RUNTIME.get().unwrap().cfg.enabled {
         logger("SAFE_MODE: cosmetics.json enabled=false; WinHTTP hooks NOT installed; all requests remain native");

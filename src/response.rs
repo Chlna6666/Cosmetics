@@ -60,6 +60,9 @@ pub struct Rule {
     /// This never produces entitlement receipts or mutates the inventory API.
     #[serde(default)]
     pub official_preview_ids: String,
+    /// Only use ZIPs in capes/; completely ignore old Cosmos overrides/catalog.
+    #[serde(default)]
+    pub local_only: bool,
 }
 
 impl Config {
@@ -181,20 +184,25 @@ pub fn overlay(
         }
         Mode::InventoryProbe => Ok(None),
         Mode::AppendArray => {
-            let path = guarded_path(base, &rule.file)?;
-            let data=match fs::read(&path) {
-                Ok(data)=>data,
-                Err(e) if e.kind()==std::io::ErrorKind::NotFound
-                    && rule.name=="dressing_room_capes" =>
-                    crate::resources::capes_json().to_vec(),
-                Err(e)=>return Err(format!("{}: {e}",path.display())),
+            let data=if rule.local_only {
+                // A genuinely standalone cape folder needs no overrides/ JSON.
+                b"[]".to_vec()
+            } else {
+                let path = guarded_path(base, &rule.file)?;
+                match fs::read(&path) {
+                    Ok(data)=>data,
+                    Err(e) if e.kind()==std::io::ErrorKind::NotFound
+                        && rule.name=="dressing_room_capes" =>
+                        crate::resources::capes_json().to_vec(),
+                    Err(e)=>return Err(format!("{}: {e}",path.display())),
+                }
             };
             let additions: Value = serde_json::from_slice(&data)
                 .map_err(|e| format!("overlay JSON: {e}"))?;
             let add = additions.as_array().ok_or("overlay must be a JSON array")?;
             // Explicit allowlist produced by the user's optional Cosmos importer.
             // Empty/missing list disables local UI ownership presentation.
-            let official_preview_ids:HashSet<String> = if rule.official_preview_ids.is_empty() {
+            let official_preview_ids:HashSet<String> = if rule.local_only || rule.official_preview_ids.is_empty() {
                 HashSet::new()
             } else {
                 let file=guarded_path(base,&rule.official_preview_ids)?;
@@ -266,6 +274,14 @@ pub fn overlay(
         Mode::CatalogItem => {
             let id=catalog_id(request_body).map_err(|reason|
                 format!("catalog request rejected: {reason}"))?;
+            // In local-only mode reject all nonlocal product IDs without
+            // even opening legacy catalog files.
+            if rule.local_only {
+                return match crate::local_capes::catalog(&id) {
+                    Some(bytes)=>Ok(Some(bytes.to_vec())),
+                    None=>Ok(None),
+                };
+            }
             let folder = guarded_path(base, &rule.catalog_directory)?;
             let path = folder.join(format!("{id}.json"));
             let catalog_bytes=if let Some(bytes)=crate::local_capes::catalog(&id) {
@@ -335,7 +351,7 @@ mod tests {
             host: "example.test".into(), path: "/inventory".into(), method: "GET".into(),
             mode: Mode::AppendArray, pointer: "/result/items".into(),
             file: "items.json".into(), identity_key: "id".into(),
-            catalog_directory: String::new(), official_preview_ids:String::new() }
+            catalog_directory: String::new(), official_preview_ids:String::new(),local_only:false }
     }
     #[test]
     fn preserves_original_entitlements_and_deduplicates() {
@@ -349,6 +365,26 @@ mod tests {
         assert_eq!(value["result"]["items"][0]["receipt"], "genuine");
         assert_eq!(value["result"]["etag"], "unchanged");
         let _ = fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn local_only_config_ignores_legacy_files_and_builtin_cosmos_catalog() {
+        let dir=std::env::temp_dir().join(format!("cosmetics_only_{}",std::process::id()));
+        let _=fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("items.json"), r#"[{"id":"old-cloud-item"}]"#).unwrap();
+        let mut rule=append();
+        rule.name="dressing_room_capes".into();
+        rule.local_only=true;
+        rule.pointer="/result/layout/0/rows/0/components/0/items".into();
+        let body=br#"{"result":{"layout":[{"rows":[{"components":[{"type":"itemListComp","items":[]}]}]}]}}"#;
+        // No registered ZIPs in a unit test: no extra item should be injected.
+        assert!(overlay(&dir,&rule,b"",body).unwrap().is_none());
+        rule.mode=Mode::CatalogItem;
+        rule.catalog_directory="legacy_catalog_that_does_not_exist".into();
+        let id="5bba5540-377b-4ec2-9633-4551c4e82e37";
+        let req=format!(r#"{{"itemid":"{id}"}}"#);
+        assert!(overlay(&dir,&rule,req.as_bytes(),b"").unwrap().is_none());
+        let _=fs::remove_dir_all(dir);
     }
     #[test]
     fn unknown_inventory_schema_fails_without_mutating_input() {

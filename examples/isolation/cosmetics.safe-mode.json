@@ -1,0 +1,90 @@
+{
+  "enabled": false,
+  "max_capture_bytes": 4194304,
+  "rules": [
+    {
+      "name": "dressing_room_capes",
+      "enabled": true,
+      "host": "store.mktpl.minecraft-services.net",
+      "method": "GET,POST",
+      "path": "/api/v2.0/layout/pages/DressingRoom_Capes",
+      "mode": "append_array",
+      "pointer": "/result/layout/0/rows/1/components/1/items",
+      "identity_key": "id",
+      "file": "overrides/capes_items.json",
+      "official_preview_ids": "overrides/official_cape_preview_ids.json"
+    },
+    {
+      "name": "persona_profile",
+      "enabled": true,
+      "host": "store.mktpl.minecraft-services.net",
+      "method": "GET,POST",
+      "path": "/api/v2.0/layout/pages/DressingRoom_PersonaProfile",
+      "mode": "persona_profile",
+      "file": "overrides/persona_profile_items.json"
+    },
+    {
+      "name": "custom_skins_selector",
+      "enabled": false,
+      "host": "store.mktpl.minecraft-services.net",
+      "method": "GET,POST",
+      "path": "/api/v2.0/layout/pages/MultiItemPage_PersonaSkinSelector",
+      "mode": "append_array",
+      "pointer": "/result/layout/0/rows",
+      "identity_key": "controlId",
+      "file": "overrides/skins_selector_rows.json"
+    },
+    {
+      "name": "custom_persona_creator",
+      "enabled": false,
+      "host": "store.mktpl.minecraft-services.net",
+      "method": "GET,POST",
+      "path": "/api/v2.0/layout/pages/MultiItemPage_PersonaCharacterCreator",
+      "mode": "append_array",
+      "pointer": "/result/layout/0/rows",
+      "identity_key": "controlId",
+      "file": "overrides/persona_creator_rows.json"
+    },
+    {
+      "name": "custom_capes_catalog_page",
+      "enabled": false,
+      "host": "store.mktpl.minecraft-services.net",
+      "method": "GET,POST",
+      "path": "/api/v2.0/layout/pages/PersonaCreatorPage_master_player_account!CustomCapes",
+      "mode": "replace_json",
+      "file": "overrides/custom_capes_page.json"
+    },
+    {
+      "name": "official_inventory_schema_probe",
+      "enabled": false,
+      "host": "entitlements.mktpl.minecraft-services.net",
+      "method": "GET",
+      "path": "/api/v1.0/player/inventory?includeReceipt=true",
+      "mode": "inventory_probe"
+    },
+    {
+      "name": "catalog_custom_item_metadata",
+      "enabled": true,
+      "host": "20ca2.playfabapi.com",
+      "method": "POST",
+      "path": "/Catalog/GetPublishedItem",
+      "mode": "catalog_item",
+      "catalog_directory": "overrides/catalog"
+    },
+    {
+      "name": "catalog_search_experimental",
+      "enabled": false,
+      "host": "20ca2.playfabapi.com",
+      "method": "POST",
+      "path": "/Catalog/Search",
+      "mode": "append_array",
+      "pointer": "/data/Items",
+      "identity_key": "Id",
+      "file": "overrides/catalog_search_items.json"
+    }
+  ],
+  "debug": {
+    "verbose": true,
+    "response_shape": true
+  }
+}

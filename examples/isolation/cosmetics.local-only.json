@@ -1,0 +1,30 @@
+{
+  "enabled": true,
+  "max_capture_bytes": 4194304,
+  "debug": {
+    "verbose": true,
+    "response_shape": true
+  },
+  "rules": [
+    {
+      "name": "dressing_room_capes",
+      "enabled": true,
+      "host": "store.mktpl.minecraft-services.net",
+      "method": "GET,POST",
+      "path": "/api/v2.0/layout/pages/DressingRoom_Capes",
+      "mode": "append_array",
+      "pointer": "/result/layout/0/rows/1/components/1/items",
+      "identity_key": "id",
+      "local_only": true
+    },
+    {
+      "name": "catalog_custom_item_metadata",
+      "enabled": true,
+      "host": "20ca2.playfabapi.com",
+      "method": "POST",
+      "path": "/Catalog/GetPublishedItem",
+      "mode": "catalog_item",
+      "local_only": true
+    }
+  ]
+}

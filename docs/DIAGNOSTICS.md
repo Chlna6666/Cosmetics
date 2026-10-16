@@ -153,3 +153,15 @@ If the packaged `cosmetics.json` was not updated, older local rules take precede
 `native_persona` 和 `experimental_plaintext` 分别区分原生 Persona 包与
 实验性 PNG 转换包；`in_game_loaded=UNVERIFIED` 不是错误而是未证实。
 出现 `RESPONSE_REPLACED` 只是 HTTP 替换成功，真实装备仍需检查。
+
+
+## v0.1.9 A/B 检查（无需手动编辑八条规则）
+
+构建包附带 `cosmetics.safe-mode.json` 与 `cosmetics.local-only.json`。
+建议先将安全模式文件复制/重命名为 `cosmetics.json`，重启游戏验证
+原版市场能否正常显示；再替换为 `cosmetics.local-only.json` 测试。
+第二套配置只启用更衣室和本地商品元数据两条规则，
+并通过 `local_only=true` 禁止加载旧 Cosmos JSON 和内置示例。
+如果仍然只看到 `Catalog/Search` 而没有 `DressingRoom_Capes`，
+这是游戏没有调用目标页面，并不表示 ZIP 校验失败。
+本地 ZIP 已注册 ≠ 游戏更衣室已接收 ≠ Persona 装备成功。
