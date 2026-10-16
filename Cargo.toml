@@ -1,0 +1,17 @@
+[package]
+name = "cosmetics"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "GPL-3.0-only"
+description = "Standalone Minecraft Bedrock dressing-room HTTP response overlays"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(windows)'.dependencies]
+minhook-sys = "0.1.1"
