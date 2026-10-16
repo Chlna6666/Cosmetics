@@ -4,7 +4,7 @@ Minecraft Bedrock (Windows) standalone native **Rust DLL** for cosmetic dressing
 HTTP response overlays. This is a research build, not a proven cape unlocker.
 
 **Not a BLoader mod:** No BLoader API is linked or used. BMCBL can inject
-\`Cosmetics.dll\` through its independent native DLL injection path. The DLL only
+`Cosmetics.dll` through its independent native DLL injection path. The DLL only
 uses Windows WinHTTP/MinHook, JSON files, and logs; it never reads ClientInstance
 or LocalPlayer and does not patch Minecraft's EXE.
 
@@ -14,7 +14,7 @@ or LocalPlayer and does not patch Minecraft's EXE.
 - Allow the original character creator / skin selector to be extended with JSON
   rules, without overwriting official page data.
 - Resolve *locally registered* PlayFab catalog item IDs to test Persona package
-  metadata containing a \`personabinary\` ZIP URL.
+  metadata containing a `personabinary` ZIP URL.
 - Preserve every existing inventory entitlement, receipt and response field;
   use append-only, deduplicated overlays. Never send account data to a third
   party. Never overwrite or delete the official premium cache.
@@ -26,12 +26,12 @@ On Windows with Rust (MSVC toolchain + Visual Studio C++ build tools installed):
     cargo test
     cargo build --release
 
-Output: \`target/release/cosmetics.dll\`.
+Output: `target/release/cosmetics.dll`.
 
-Copy \`cosmetics.dll\`, \`cosmetics.json\`, and the \`overrides/\` folder
+Copy `cosmetics.dll`, `cosmetics.json`, and the `overrides/` folder
 into the same native-mod directory. Inject the DLL using BMCBL's **native**
 DLL injection facility, independently of BLoader. The DLL starts a worker thread
-outside DllMain and writes \`logs/cosmetics.log\` beside itself.
+outside DllMain and writes `logs/cosmetics.log` beside itself.
 
 No proxy, certificate installation, backend HTTP service or DLL-specific
 network connection is needed. Ordinary game HTTPS traffic uses the original TLS
@@ -39,18 +39,19 @@ stack and the module observes/modifies **plaintext at WinHTTP API boundaries**.
 
 ## Supported response rules
 
-All rules live in \`cosmetics.json\`, matching host, exact path (including
+All rules live in `cosmetics.json`, matching host, exact path (including
 query string), and HTTP verb. Only active rules are processed.
 
 | Route | Default | Semantics |
 | --- | --- | --- |
-| \`DressingRoom_Capes\` | active | Append unique entries to the selected cape list; don't replace official items |
-| \`DressingRoom_PersonaProfile\` | inactive | Append menu rows (requires schema-specific sample) |
-| \`MultiItemPage_PersonaSkinSelector\` | inactive | Append classic-skin rows (requires schema-specific sample) |
-| \`MultiItemPage_PersonaCharacterCreator\` | inactive | Append Persona rows (requires schema-specific sample) |
-| \`/api/v1.0/player/inventory?includeReceipt=true\` | inactive | **Append only** after verifying actual response schema |
-| \`/Catalog/GetPublishedItem\` | active | Override responses for exact, explicitly registered local item IDs |
-| \`/Catalog/Search\` | inactive | Experimental catalog list extension |
+| `DressingRoom_Capes` | active | Append unique entries to the selected cape list; don't replace official items |
+| `DressingRoom_PersonaProfile` | inactive | Append menu rows (requires schema-specific sample) |
+| `MultiItemPage_PersonaSkinSelector` | inactive | Append classic-skin rows (requires schema-specific sample) |
+| `MultiItemPage_PersonaCharacterCreator` | inactive | Append Persona rows (requires schema-specific sample) |
+| `PersonaCreatorPage_master_player_account!CustomCapes` | inactive | Optional, complete version-compatible custom page JSON |
+| `/api/v1.0/player/inventory?includeReceipt=true` | inactive | **Append only** after verifying actual response schema |
+| `/Catalog/GetPublishedItem` | active | Override responses for exact, explicitly registered local item IDs |
+| `/Catalog/Search` | inactive | Experimental catalog list extension |
 
 Array overlay files contain a JSON array. Empty arrays mean **no change**.
 Append mode requires an existing JSON array at the configured JSON Pointer.
@@ -58,16 +59,20 @@ If the structure changed, the module *replays the original body* instead of
 replacing it with empty/default data. For duplicate identifiers it preserves the
 original item, including any official entitlement and receipt.
 
-The inventory \`/result/items\` path in the sample config is deliberately a
+Disabled response rules are still observed and logged, without altering the response.
+A `replace_json` rule can serve a complete custom storefront page but is never
+used on the user's entitlement inventory.
+
+The inventory `/result/items` path in the sample config is deliberately a
 **placeholder, not a verified schema**. The inventory hook is disabled until a
 sanitized, version-specific response establishes the real array location and
 unique item identity. Do not blindly enable it or attempt to rewrite receipts.
 
-\`/Catalog/GetPublishedItem\` uses \`itemid\` from the request body to read only
-\`overrides/catalog/<uuid>.json\`. The local file must have the same
-\`data.Item.Id\`. Requests for any other item pass through untouched.
+`/Catalog/GetPublishedItem` uses `itemid` from the request body to read only
+`overrides/catalog/<uuid>.json`. The local file must have the same
+`data.Item.Id`. Requests for any other item pass through untouched.
 
-For ordinary custom classic skins, prefer Bedrock's native \`skin_packs\` folder;
+For ordinary custom classic skins, prefer Bedrock's native `skin_packs` folder;
 it does not require network interception. For standalone Persona capes, the game
 must still accept the referenced ZIP package and its integrity checks. The
 response hook alone does **not** bypass signatures or server-side ownership.
@@ -101,14 +106,14 @@ WinHTTP flow passes through to Minecraft unchanged.
 ## Safe validation sequence
 
 1. Start in an isolated copy of the game with all overlay arrays empty.
-   Check \`logs/cosmetics.log\` for successful WinHTTP hook installation.
+   Check `logs/cosmetics.log` for successful WinHTTP hook installation.
 2. Navigate into the original dressing room and verify logging for target
    routes. If nothing appears, inspect the game's actual HTTP stack and
    injection timing; **do not assume WinHTTP is used**.
-3. Insert one unique test cape item into \`overrides/capes_items.json\` and
+3. Insert one unique test cape item into `overrides/capes_items.json` and
    verify the list still includes *all* original items.
 4. Add a matching catalog JSON and a legitimate test ZIP URL, then check
-   downloads, \`premium_cache/persona\`, and cache reuse without editing
+   downloads, `premium_cache/persona`, and cache reuse without editing
    the user's official cache.
 5. After observing the real official inventory schema, update the exact
    JSON pointer and identifier key, enable its overlay and verify that

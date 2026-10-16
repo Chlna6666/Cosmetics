@@ -282,9 +282,13 @@ unsafe extern "system" fn on_receive(h:H,reserved:H)->B {
         let req = match state.requests.get(&state_key(h)) {Some(r)=>r,None=>return ok};
         if req.async_session {return ok;}
         let runtime=match RUNTIME.get(){Some(r)=>r,None=>return ok};
-        let rule=match runtime.cfg.match_rule(&req.host,&req.path,&req.method){
+        let rule=match runtime.cfg.observe_rule(&req.host,&req.path,&req.method){
             Some(r)=>r,None=>return ok
         };
+        if !rule.enabled {
+            logger(&format!("{}: observed; overlay disabled; passthrough",rule.name));
+            return ok;
+        }
         (rule,req.request_body.clone())
     };
     let runtime=match RUNTIME.get(){Some(r)=>r,None=>return ok};
@@ -332,7 +336,7 @@ unsafe extern "system" fn on_receive(h:H,reserved:H)->B {
     } else {
         logger(&format!("{}: incomplete buffered response; replay and passthrough",rule.name));
     }
-    let replay=Replay {bytes:final_body,position:0,complete,replaced,catalog:rule.mode==Mode::CatalogItem};
+    let replay=Replay {bytes:final_body,position:0,complete,replaced,catalog:rule.mode==Mode::CatalogItem || rule.mode==Mode::ReplaceJson};
     if let Some(req)=tables().lock().unwrap_or_else(|e|e.into_inner())
         .requests.get_mut(&state_key(h)) {
         req.replay=Some(replay);

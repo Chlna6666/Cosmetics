@@ -24,7 +24,7 @@ pub struct Config {
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum Mode { AppendArray, CatalogItem }
+pub enum Mode { AppendArray, CatalogItem, ReplaceJson }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Rule {
@@ -47,14 +47,16 @@ pub struct Rule {
 }
 
 impl Config {
-    pub fn match_rule(&self, host: &str, path: &str, method: &str) -> Option<Rule> {
+    pub fn observe_rule(&self, host: &str, path: &str, method: &str) -> Option<Rule> {
         if !self.enabled { return None; }
         self.rules.iter().find(|r| {
-            r.enabled &&
             r.host.eq_ignore_ascii_case(host) &&
             r.path == path &&
             r.method.eq_ignore_ascii_case(method)
         }).cloned()
+    }
+    pub fn match_rule(&self, host: &str, path: &str, method: &str) -> Option<Rule> {
+        self.observe_rule(host, path, method).filter(|rule| rule.enabled)
     }
 }
 
@@ -77,6 +79,15 @@ pub fn overlay(
     original_body: &[u8],
 ) -> Result<Option<Vec<u8>>, String> {
     match rule.mode {
+        Mode::ReplaceJson => {
+            let path = guarded_path(base, &rule.file)?;
+            let bytes = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            // Validate before exposing any data to the game.
+            let value: Value = serde_json::from_slice(&bytes)
+                .map_err(|e| format!("replacement JSON invalid: {e}"))?;
+            if !value.is_object() { return Err("replacement root must be object".into()); }
+            serde_json::to_vec(&value).map(Some).map_err(|e| e.to_string())
+        }
         Mode::AppendArray => {
             let path = guarded_path(base, &rule.file)?;
             let additions: Value = serde_json::from_slice(&fs::read(&path)

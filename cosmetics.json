@@ -47,6 +47,15 @@
       "file": "overrides/persona_creator_rows.json"
     },
     {
+      "name": "custom_capes_catalog_page",
+      "enabled": false,
+      "host": "store.mktpl.minecraft-services.net",
+      "method": "GET",
+      "path": "/api/v2.0/layout/pages/PersonaCreatorPage_master_player_account!CustomCapes",
+      "mode": "replace_json",
+      "file": "overrides/custom_capes_page.json"
+    },
+    {
       "name": "official_inventory_preserving_append",
       "enabled": false,
       "host": "entitlements.mktpl.minecraft-services.net",

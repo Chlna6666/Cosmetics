@@ -6,6 +6,8 @@
 - [x] Add WinHTTP synchronous request/response interception and local logs
 - [x] Support local per-item PlayFab GetPublishedItem metadata response files
 - [x] Add guarded config, empty template overlays and pure Rust unit tests
+- [x] Log observed disabled endpoints without changing responses
+- [x] Support optional full JSON replacement for custom storefront pages (not inventory)
 - [ ] Run \`cargo test\` and \`cargo build --release\` on Windows MSVC
 - [ ] Confirm Minecraft's actual HTTP stack and WinHTTP sync/async behavior
 - [ ] Verify real DressingRoom_Capes JSON layout for each target version
