@@ -16,6 +16,9 @@ type B = i32;
 const ASYNC_FLAG: u32 = 0x1000_0000;
 const QUERY_NUMBER: u32 = 0x2000_0000;
 const QUERY_CONTENT_TYPE: u32 = 1;
+const QUERY_CUSTOM: u32 = 65535;
+const QUERY_VERSION: u32 = 18;
+const QUERY_STATUS_TEXT: u32 = 20;
 const QUERY_CONTENT_LENGTH: u32 = 5;
 const QUERY_STATUS_CODE: u32 = 19;
 const QUERY_CONTENT_ENCODING: u32 = 29;
@@ -47,6 +50,9 @@ extern "system" {
     fn SetLastError(code: u32);
     fn GetLastError() -> u32;
     fn OutputDebugStringW(text:*const u16);
+    fn GetStdHandle(handle:u32)->H;
+    fn GetConsoleMode(handle:H,mode:*mut u32)->B;
+    fn WriteConsoleW(handle:H,text:*const u16,len:u32,written:*mut u32,reserved:H)->B;
 }
 
 type OpenFn = unsafe extern "system" fn(*const u16,u32,*const u16,*const u16,u32)->H;
@@ -89,19 +95,34 @@ struct Runtime {
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 fn logger(message: &str) {
-    if let Some(r) = RUNTIME.get() {
-        let mut out = r.log.lock().unwrap_or_else(|e| e.into_inner());
-        let _ = writeln!(out, "[Cosmetics] {message}");
-        let _ = out.flush();
+    let line=format!("[Cosmetics] {message}");
+    if let Some(r)=RUNTIME.get() {
+        {
+            let mut out=r.log.lock().unwrap_or_else(|e|e.into_inner());
+            let _=writeln!(out,"{line}");
+            let _=out.flush();
+        }
+        // All startup/status messages, not only DEBUG, are visible in
+        // Visual Studio / DebugView. Use an existing attached console when
+        // present; do not allocate a console in Minecraft by default.
+        let wide:Vec<u16>=line.encode_utf16().chain(Some(0)).collect();
+        unsafe {
+            OutputDebugStringW(wide.as_ptr());
+            let console=GetStdHandle((-11_i32) as u32);
+            let mut mode=0u32;
+            if !console.is_null() && console as usize!=usize::MAX
+                && GetConsoleMode(console,&mut mode)!=0 {
+                let console_text:Vec<u16>=format!("{line}\r\n").encode_utf16().collect();
+                let mut written=0;
+                let _=WriteConsoleW(console,console_text.as_ptr(),
+                    console_text.len() as u32,&mut written,ptr::null_mut());
+            }
+        }
     }
 }
 fn debug_log(message: &str) {
-    if RUNTIME.get().is_some_and(|r|r.cfg.debug.verbose) {
+    if RUNTIME.get().is_some_and(|r|r.cfg.debug.verbose){
         logger(&format!("[DEBUG] {message}"));
-        // Visible in DebugView / Visual Studio, even without a game console.
-        let line=format!("[Cosmetics DEBUG] {message}");
-        let wide:Vec<u16>=line.encode_utf16().chain(Some(0)).collect();
-        unsafe { OutputDebugStringW(wide.as_ptr()); }
     }
 }
 fn debug_json(request_id:u64, stage:&str, bytes:&[u8]) {
@@ -198,12 +219,26 @@ unsafe extern "system" fn worker(module: H) -> u32 {
     let _ = RUNTIME.set(Runtime { cfg, root, log: Mutex::new(log) });
     let registry=local_capes::initialize(&RUNTIME.get().unwrap().root);
     logger("============================================================");
+    logger(&format!("Cosmetics {} | author=Chlna6666 | license=GPL-3.0-only",
+        env!("CARGO_PKG_VERSION")));
+    logger("Source: https://github.com/Chlna6666/Cosmetics");
+    logger("Support: https://github.com/Chlna6666/Cosmetics/issues");
+    logger("Scope: local cape catalog, virtual thumbnails and Persona download; no Minecraft skin/equip hook");
+    logger("Standalone native WinHTTP DLL | logs=logs/cosmetics.log | debugger=OutputDebugStringW");
     logger(&format!("local_capes ZIP_SCAN complete discovered={} validated={} rejected={} skipped={} registered_items={} registered_assets={} native_persona={} experimental_plaintext={} in_game_loaded=UNVERIFIED",
         registry.discovered_zip,registry.accepted,registry.rejected,
         registry.discovered_zip.saturating_sub(registry.accepted+registry.rejected),
         local_capes::count(),registry.asset_count(),
         registry.native_payloads,registry.plaintext_experimental_payloads));
     for diagnostic in &registry.diagnostics {logger(&format!("local_capes: {diagnostic}"));}
+    for (index,item) in local_capes::items().iter().enumerate(){
+        let id=item.get("id").and_then(|v|v.as_str()).unwrap_or("?");
+        let name=item.get("title").and_then(|v|v.as_str()).unwrap_or("?");
+        let author=item.get("creatorName").and_then(|v|v.as_str()).unwrap_or("?");
+        let pack_id=item.pointer("/packIdentity/0/uuid").and_then(|v|v.as_str()).unwrap_or("?");
+        logger(&format!("local_capes ITEM_REGISTERED index={} name={} author={} item_uuid={} pack_uuid={} game_loaded=UNVERIFIED",
+            index+1,name,author,id,pack_id));
+    }
     logger(&format!("session_start build_version={} module=WinHTTP config_source={config_source} fail_open=true",
         env!("CARGO_PKG_VERSION")));
     logger(&format!("loaded_rules={} enabled_rules={} diagnostic_fields=redacted",
@@ -362,8 +397,9 @@ unsafe extern "system" fn on_open_request(
             let asset_kind=if path_for_diagnostics.starts_with("/personabinary/") {"persona_zip"}
                 else if path_for_diagnostics.starts_with("/thumbnails/") {"thumbnail_png"}
                 else {"unknown_asset"};
-            logger(&format!("request #{id}: LOCAL_ASSET_REQUEST type={asset_kind} method={} async={async_session}",
-                debug::redact_route_method(&method_for_diagnostics)));
+            logger(&format!("request #{id}: LOCAL_ASSET_REQUEST type={asset_kind} method={} async={async_session} uri=https://{}{}",
+                debug::redact_route_method(&method_for_diagnostics),
+                persona::LOCAL_HOST,path_for_diagnostics));
         }
         if let Some(name)=diagnostic_route {
             logger(&format!("request #{id}: route matched {name}; async={async_session}"));
@@ -554,7 +590,8 @@ unsafe extern "system" fn on_send(
             (Vec::new(),405)
         } else if let Some((bytes,kind))=local_capes::asset(&path) {
             image=kind==local_capes::AssetType::Png;
-            logger(&format!("local cape virtual resource found kind={kind:?} bytes={} source=memory",bytes.len()));
+            logger(&format!("local cape virtual resource found kind={kind:?} bytes={} source=memory url=https://{}{}",
+                bytes.len(),persona::LOCAL_HOST,path));
             (bytes.to_vec(),200)
         } else {
             let loaded=RUNTIME.get().map(|runtime|persona::load(&runtime.root,&path));
@@ -613,7 +650,8 @@ unsafe extern "system" fn on_send(
                 }else{false}
             };
             if stored{
-                logger(&format!("request #{request_id}: LOCAL_CATALOG_SYNTHETIC status=200 bytes={byte_count} upstream_request=skipped async={async_request}"));
+                let known_id=crate::response::catalog_id(&body).unwrap_or_else(|_|"unrecognized".to_string());
+                logger(&format!("request #{request_id}: LOCAL_CATALOG_SYNTHETIC item_uuid={known_id} status=200 bytes={byte_count} upstream_request=skipped async={async_request}"));
                 if async_request{
                     notify_game(h,ctx,STATUS_SEND_COMPLETE,ptr::null_mut(),0);
                 }
@@ -1060,62 +1098,82 @@ unsafe fn synthetic_header(query:u32,buffer:H,length:*mut u32,text:&str)->B {
     ptr::copy_nonoverlapping(data.as_ptr(),buffer as *mut u16,data.len());
     *length=bytes;1
 }
+// Return headers for synthetic/rewritten WinHTTP replies without consulting
+// the original handle. Synthetic requests were never sent to WinHTTP and a
+// fallback query would report incorrect handle state, leaving the GUI loading.
+fn synthetic_header_value(query:u32,custom:Option<&str>,size:usize,status:u32,png:bool,zip:bool)->Option<String>{
+    let key=query&0xffff;
+    let mime=if png {"image/png"}else if zip {"application/zip"}else{"application/json"};
+    match key {
+        QUERY_CONTENT_LENGTH=>Some(size.to_string()),
+        QUERY_STATUS_CODE=>Some(status.to_string()),
+        QUERY_STATUS_TEXT=>Some(if status==200{"OK"}else{"Not Found"}.into()),
+        QUERY_VERSION=>Some("HTTP/1.1".into()),
+        QUERY_CONTENT_TYPE=>Some(mime.into()),
+        QUERY_RAW_HEADERS_CRLF=>Some(format!(
+            "HTTP/1.1 {status} {}\r\nContent-Type: {mime}\r\nContent-Length: {size}\r\nCache-Control: no-store\r\n\r\n",
+            if status==200{"OK"}else{"Not Found"})),
+        QUERY_RAW_HEADERS=>Some(format!(
+            "HTTP/1.1 {status} {}\0Content-Type: {mime}\0Content-Length: {size}\0Cache-Control: no-store\0\0",
+            if status==200{"OK"}else{"Not Found"})),
+        QUERY_CUSTOM=>match custom.unwrap_or_default().to_ascii_lowercase().as_str(){
+            "content-type"=>Some(mime.into()),
+            "content-length"=>Some(size.to_string()),
+            "cache-control"=>Some("no-store".into()),
+            _=>None,
+        },
+        _=>None
+    }
+}
 unsafe extern "system" fn on_headers(
     h:H,query:u32,name:*const u16,buffer:H,length:*mut u32,index:*mut u32
 )->B {
-    if name.is_null() {
+    let replay={
         let state=tables().lock().unwrap_or_else(|e|e.into_inner());
-        if let Some(rep)=state.requests.get(&state_key(h))
-            .and_then(|r|r.replay.as_ref()).filter(|r|r.replaced) {
-            let code=query&0xffff;
-            let size=rep.bytes.len().to_string();
-            let content_type=if rep.png {"image/png"} else if rep.zip {"application/zip"} else {"application/json"};
-            if code==QUERY_CONTENT_LENGTH {
-                return synthetic_header(query,buffer,length,&size);
-            }
-            if code==QUERY_STATUS_CODE {
-                return synthetic_header(query,buffer,length,&rep.status.to_string());
-            }
-            if code==QUERY_CONTENT_TYPE {
-                return synthetic_header(query,buffer,length,content_type);
-            }
-            if rep.zip || rep.png || rep.catalog || rep.strip_encoding {
-                if matches!(code, QUERY_CONTENT_ENCODING|QUERY_TRANSFER_ENCODING) {
-                    SetLastError(ERROR_WINHTTP_HEADER_NOT_FOUND);
-                    return 0;
-                }
-            }
-            if code==QUERY_RAW_HEADERS_CRLF && (rep.zip || rep.png || rep.catalog) {
-                let raw=format!("HTTP/1.1 {} OK\r\nContent-Type: {}\r\nContent-Length: {}\r\n\r\n",
-                    rep.status,content_type,size);
-                return synthetic_header(query,buffer,length,&raw);
-            }
-            if code==QUERY_RAW_HEADERS && (rep.zip || rep.png || rep.catalog) {
-                // This is a MULTI_SZ response.
-                let raw=format!("HTTP/1.1 {} OK\0Content-Type: {}\0Content-Length: {}\0\0",
-                    rep.status,content_type,size);
-                return synthetic_header(query,buffer,length,&raw);
-            }
+        state.requests.get(&state_key(h))
+            .and_then(|r|r.replay.as_ref())
+            .filter(|r|r.replaced)
+            .map(|rep|(rep.bytes.len(),rep.status,rep.png,rep.zip,rep.catalog,rep.strip_encoding,r.synthetic))
+    };
+    if let Some((size,status,png,zip,_catalog,strip_encoding,synthetic))=replay {
+        let key=query&0xffff;
+        let custom=if key==QUERY_CUSTOM && !name.is_null(){Some(read_wide(name))}else{None};
+        let value=synthetic_header_value(query,custom.as_deref(),size,status,png,zip);
+        if let Some(value)=value {
+            return synthetic_header(query,buffer,length,&value);
+        }
+        // Synthetic handles have no original HTTP response. Do not consult
+        // WinHttpQueryHeaders on them even when the caller asks for a header
+        // we do not emit. Fail with the correct 'header not found' status.
+        if synthetic || matches!(key,QUERY_CONTENT_ENCODING|QUERY_TRANSFER_ENCODING)
+            && (strip_encoding || png || zip) {
+            SetLastError(ERROR_WINHTTP_HEADER_NOT_FOUND);
+            return 0;
         }
     }
     original!(HEADERS,HeadersFn)(h,query,name,buffer,length,index)
 }
+
 unsafe extern "system" fn on_close(h:H)->B {
     let close_debug={
         let state=tables().lock().unwrap_or_else(|e|e.into_inner());
         state.requests.get(&state_key(h)).and_then(|r| {
-            r.diagnostic_route.as_ref().map(|name|{
-                let (kind,bytes,read)=if let Some(rep)=r.replay.as_ref() {
-                    ("replay",rep.bytes.len(),rep.position)
-                }else if let Some(cap)=r.capture.as_ref(){
-                    ("async_capture",cap.bytes.len(),0)
-                }else {("passthrough",0,0)};
-                (r.id,name.clone(),kind,bytes,read)
-            })
+            if !r.intercept_enabled {return None;}
+            let name=r.diagnostic_route.clone().unwrap_or_else(||
+                if r.host.eq_ignore_ascii_case(persona::LOCAL_HOST) {
+                    "local_asset".into()
+                }else{"target_unknown".into()});
+            let (kind,bytes,read,synthetic)=if let Some(rep)=r.replay.as_ref() {
+                ("replay",rep.bytes.len(),rep.position,r.synthetic)
+            }else if let Some(cap)=r.capture.as_ref(){
+                ("async_capture",cap.bytes.len(),0,false)
+            }else {("passthrough",0,0,false)};
+            Some((r.id,name,kind,bytes,read,synthetic))
         })
     };
-    if let Some((id,route,kind,bytes,read))=close_debug {
-        debug_log(&format!("request #{id}: HANDLE_CLOSE route={route} mode={kind} bytes={bytes} consumed_bytes={read}"));
+    if let Some((id,route,kind,bytes,read,synthetic))=close_debug {
+        logger(&format!("request #{id}: HANDLE_CLOSE route={route} mode={kind} synthetic={synthetic} bytes={bytes} consumed_bytes={read} fully_consumed={}",
+            kind=="replay" && bytes==read));
     }
     let keep_capture={
         let state=tables().lock().unwrap_or_else(|e|e.into_inner());
@@ -1137,6 +1195,18 @@ unsafe extern "system" fn on_close(h:H)->B {
 #[cfg(test)]
 mod isolation_tests {
     use super::*;
+    #[test]
+    fn synthetic_headers_support_names_and_standard_status(){
+        assert_eq!(synthetic_header_value(QUERY_CUSTOM,Some("Content-Type"),5,200,false,false),
+            Some("application/json".into()));
+        assert_eq!(synthetic_header_value(QUERY_CUSTOM,Some("Content-Length"),5,200,false,false),
+            Some("5".into()));
+        assert_eq!(synthetic_header_value(QUERY_VERSION,None,5,200,false,false),
+            Some("HTTP/1.1".into()));
+        assert_eq!(synthetic_header_value(QUERY_STATUS_TEXT,None,5,200,false,false),
+            Some("OK".into()));
+        assert_eq!(synthetic_header_value(QUERY_CUSTOM,Some("Authorization"),5,200,false,false),None);
+    }
     #[test]
     fn only_complete_known_local_catalog_requests_are_synthesized(){
         let id="11111111-2222-4333-8444-555555555555";

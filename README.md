@@ -1,6 +1,6 @@
 # Cosmetics
 
-Version: **0.1.13**. Two Cosmos CDN-backed cape metadata presets are included,
+Version: **0.1.14**. Two Cosmos CDN-backed cape metadata presets are included,
 with **NotOwned** ownership. Their actual Persona ZIPs are **not embedded**
 or republished. The older manifest-only diagnostic ZIP is still available as
 an opt-in protocol probe.
@@ -543,3 +543,41 @@ asset is native Persona or an experimental plaintext payload.
 Persona-shaped ZIP does NOT mean that Minecraft accepts its proprietary
 Persona resource format or allows it to be equipped. The 26.40 game-side
 resource/equipment checks must be verified separately after HTTP delivery.
+
+## v0.1.14 — User-visible project identity and complete local cape HTTP diagnostics
+
+On launch the DLL now logs/outputs the build version, author (`Chlna6666`),
+repository (`https://github.com/Chlna6666/Cosmetics`),
+issue tracker, and GPL-3.0-only license. All log lines are also forwarded
+to Windows `OutputDebugStringW` (DebugView/Visual Studio) and to an
+**existing** attached Windows console if the Minecraft process has one.
+No new console is created in the game by default. Minecraft is usually
+a GUI application without a console; `logs/cosmetics.log` remains the
+reliable record. This is not automatically the BMCBL launcher log.
+
+Each local ZIP entry is logged with cape title, author, item UUID, Persona
+pack UUID, image dimensions and experimental/native resource type.
+Virtual resource requests now report the requested `cosmetics.invalid`
+URL and close with returned vs read byte counts.
+
+The uploaded single-cape example `cape.json` + `cape.png` (64x32 RGBA) is a
+valid archive; it lacks a native `persona.zip`. Like all PNG-only packs,
+Cosmetics creates an **experimental plaintext Persona-shaped ZIP**. Valid
+ZIP and image bytes do not guarantee native Bedrock Persona equipability.
+
+### Important WinHTTP fix
+
+Before this change, some synthetic HTTP header queries fell back to original
+`WinHttpQueryHeaders` even though no network request was sent, including
+named queries (`WINHTTP_QUERY_CUSTOM`) and status text/version queries.
+This could make a UI wait for response metadata that cannot exist on
+the original handle. The synthetic implementation now returns consistent
+Content-Type, Content-Length, Cache-Control, status text, version and raw
+headers. Unknown synthetic headers return HEADER_NOT_FOUND.
+Unrelated original/disabled marketplace requests remain unchanged.
+
+**Unresolved:** only the actual game can confirm whether it accepts the
+unsigned experimental Persona ZIP. A cape visible in the list is NOT
+evidence of a successfully loaded or equipped game cape. Check the
+`LOCAL_CATALOG_SYNTHETIC`, `LOCAL_ASSET_REQUEST`, `LOCAL_ASSET_RESPONSE_READY`,
+`client_read_complete` and `HANDLE_CLOSE` events when clicking an item.

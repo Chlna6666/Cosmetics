@@ -197,3 +197,24 @@ If the packaged `cosmetics.json` was not updated, older local rules take precede
 如果只是服务端 400 且没有 `LOCAL_CATALOG_SYNTHETIC`，说明该请求不属于
 当前 DLL 已注册的本地商品 ID（或请求体没有完整捕获）。
 HTTP 资源送达仍不代表 Minecraft Persona 验证或装备成功。
+
+## v0.1.14 启动与披风全链路日志
+
+Cosmetics 启动时输出版本、作者 Chlna6666、GPL-3.0-only、
+`https://github.com/Chlna6666/Cosmetics` 和 Issues 地址。
+文件日志：`logs/cosmetics.log`。全部日志也输出 Windows 调试器
+`OutputDebugStringW`，可用 DebugView 查看。有现成的 Windows 控制台时
+同时输出；GUI Minecraft 默认没有控制台，也不会自动转到 BMCBL 日志。
+
+`ITEM_REGISTERED` 输出条目作者/名称/UUID/Persona pack UUID。
+`CAPE_REGISTERED` 表示内存加载贴图并生成实验性资源，
+`game_loaded=UNVERIFIED` 代表未证实游戏解析成功。
+`LOCAL_CATALOG_SYNTHETIC` 表示本地商品的 HTTP 元数据由 DLL 合成。
+`LOCAL_ASSET_REQUEST` 附上本地 `cosmetics.invalid` 的虚拟资源 URL。
+`LOCAL_ASSET_RESPONSE_READY` 表示资源字节准备就绪。
+`HANDLE_CLOSE` 输出总字节数、已读取字节数和 fully_consumed。
+
+修复了合成 WinHTTP 响应的自定义 Content-Type/Content-Length 查询、
+HTTP 状态文本和 HTTP 版本查询。之前这些查询可能访问没有任何网络
+响应的原始句柄，导致错误或等待。注意即便 WinHTTP 下载完整，
+PNG-only 生成的明文 Persona ZIP 仍未被证实可在游戏里装备。

@@ -127,3 +127,14 @@ entry grants server-side ownership.
 - [x] Report dimensions per locally registered cape
 - [ ] Confirm game-side Persona parsing and equipment after catalog/resource delivery
 - [ ] Validate callback/WinHTTP behavior on real Minecraft Bedrock 26.40
+
+
+## v0.1.14 diagnostics and synthetic response compatibility
+- [x] Print version, author, project URL, GPL license and support link at game startup
+- [x] Echo startup, status and debug events to debugger and pre-existing console
+- [x] Log each registered cape title, author, product UUID and pack UUID
+- [x] Log local asset URLs and content consumption on request close
+- [x] Handle named synthetic WinHTTP query headers and HTTP status/version
+- [x] Preserve unrelated upstream and disabled-rule header queries
+- [ ] In-game verify any additional WinHTTP header/query requirements
+- [ ] Verify real Bedrock Persona parsing/equipment separately from HTTP transport
