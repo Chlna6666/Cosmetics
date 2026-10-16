@@ -363,7 +363,7 @@ unsafe extern "system" fn on_open_request(
                 else if path_for_diagnostics.starts_with("/thumbnails/") {"thumbnail_png"}
                 else {"unknown_asset"};
             logger(&format!("request #{id}: LOCAL_ASSET_REQUEST type={asset_kind} method={} async={async_session}",
-                diagnostics::redact_route_method(&method_for_diagnostics)));
+                debug::redact_route_method(&method_for_diagnostics)));
         }
         if let Some(name)=diagnostic_route {
             logger(&format!("request #{id}: route matched {name}; async={async_session}"));
