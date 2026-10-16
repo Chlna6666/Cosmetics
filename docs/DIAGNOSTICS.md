@@ -135,3 +135,21 @@ If the packaged `cosmetics.json` was not updated, older local rules take precede
 `official_inventory_schema_probe`。启用后捕获并输出脱敏布局摘要，
 完整原始库存数据、Authorization、收据不落盘、不上传第三方 API。
 当前 Cosmos 的远端 `/api/v1.0/player/inventory` 修改算法不在公开仓库中。
+
+## v0.1.8 市场异常隔离与本地披风统计
+
+如果日志中 PlayFab `Catalog/Search` 返回 `401`，代表服务端拒绝该请求。
+旧版虽然规则为 disabled，却仍在 session/connection 级别覆盖回调，
+可能干扰原版网络处理。新版只给具体启用的 request handle 安装桥接。
+仍然需要实机 A/B 验证，无法仅从 401 日志证明具体原因。
+
+快速 A/B 实验：在 cosmetics.json 根节点将 ``"enabled": false`，
+彻底关闭游戏并重启。预期 `SAFE_MODE` 及 `WinHTTP hooks NOT installed`；
+此状态下市场请求不会被 Cosmetics Hook。如仍有 401，排查账号授权。
+
+`ZIP_SCAN complete discovered=N validated=N rejected=N skipped=N`
+只表示本地 ZIP 校验。`registered_items` 表示内存中商品条目数量，
+`registered_assets` 是虚拟 Persona/PNG 资源数量。
+`native_persona` 和 `experimental_plaintext` 分别区分原生 Persona 包与
+实验性 PNG 转换包；`in_game_loaded=UNVERIFIED` 不是错误而是未证实。
+出现 `RESPONSE_REPLACED` 只是 HTTP 替换成功，真实装备仍需检查。

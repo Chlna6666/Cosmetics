@@ -78,3 +78,13 @@ entry grants server-side ownership.
 - [ ] Verify whether 26.40 accepts the experimental PNG-to-Persona payload
 - [ ] Implement validated game-native Persona binary authoring when the real schema is known
 - [ ] Verify selection, equip persistence and multiplayer visibility in-game
+
+## v0.1.8 Marketplace isolation
+- [x] Keep original WinHTTP status callback and notification flags on disabled/unrelated requests
+- [x] Install async callback bridge only on specifically enabled request handles
+- [x] Bypass original Send/Write/Receive wrappers on unrelated requests
+- [x] Add `enabled=false` no-hook safe mode for A/B reproduction
+- [x] Split ZIP scanning/registration from unverified Minecraft acceptance in logs
+- [ ] Validate PlayFab 401 A/B with Cosmetics hooks completely disabled
+- [ ] Verify target async callback inheritance and status event ordering in Minecraft 26.40
+- [ ] Verify native Persona equip while original marketplace is healthy

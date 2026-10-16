@@ -40,12 +40,20 @@ pub struct Registry {
     catalogs:HashMap<String,Vec<u8>>,
     assets:HashMap<String,LocalAsset>,
     pub diagnostics:Vec<String>,
+    pub discovered_zip:usize,
+    pub accepted:usize,
+    pub rejected:usize,
+    pub native_payloads:usize,
+    pub plaintext_experimental_payloads:usize,
 }
 static REGISTRY:OnceLock<Registry>=OnceLock::new();
 pub fn initialize(root:&Path)->&'static Registry {
     REGISTRY.get_or_init(||Registry::scan(root))
 }
 pub fn count()->usize { REGISTRY.get().map_or(0,|r|r.items.len()) }
+impl Registry {
+    pub fn asset_count(&self)->usize {self.assets.len()}
+}
 pub fn items()->&'static [Value] {REGISTRY.get().map_or(&[],|r|r.items.as_slice())}
 pub fn catalog(id:&str)->Option<&'static [u8]>{
     REGISTRY.get()?.catalogs.get(&id.to_ascii_lowercase()).map(Vec::as_slice)
@@ -132,18 +140,31 @@ impl Registry {
             }
         };
         paths.sort();
+        reg.discovered_zip=paths.len();
+        let skipped=paths.len().saturating_sub(MAX_PACKS);
+        if skipped>0 {
+            reg.diagnostics.push(format!("{skipped} extra ZIP files skipped (limit={MAX_PACKS})"));
+        }
         let mut reserved=HashSet::new();
         let mut total=0usize;
         for path in paths.into_iter().take(MAX_PACKS){
             let label=path.file_name().and_then(|x|x.to_str()).unwrap_or("<invalid>").to_owned();
             match Self::read_one(&path,&mut reg,&mut reserved,&mut total){
-                Ok(name)=>reg.diagnostics.push(format!("loaded local cape pack {label}: {name}")),
-                Err(err)=>reg.diagnostics.push(format!("rejected local cape pack {label}: {err}"))
+                Ok((name,native))=>{
+                    reg.accepted+=1;
+                    if native {reg.native_payloads+=1;}else{reg.plaintext_experimental_payloads+=1;}
+                    reg.diagnostics.push(format!("ZIP_VALIDATED {label}: {name} payload={}",
+                        if native {"native_persona"}else{"experimental_plaintext_png"}));
+                }
+                Err(err)=>{
+                    reg.rejected+=1;
+                    reg.diagnostics.push(format!("ZIP_REJECTED {label}: {err}"));
+                }
             }
         }
         reg
     }
-    fn read_one(path:&Path,reg:&mut Registry,reserved:&mut HashSet<String>,total:&mut usize)->Result<String,String>{
+    fn read_one(path:&Path,reg:&mut Registry,reserved:&mut HashSet<String>,total:&mut usize)->Result<(String,bool),String>{
         let metadata=fs::metadata(path).map_err(|e|e.to_string())?;
         if metadata.len()==0||metadata.len()>MAX_PACK_FILE{return Err("pack size exceeds 64MiB".into());}
         let mut zip=ZipArchive::new(File::open(path).map_err(|e|e.to_string())?)
@@ -197,6 +218,7 @@ impl Registry {
             Err(e)=>return Err(e.to_string()),
         };
         if png.is_none()&&original.is_none(){return Err("pack requires cape.png or persona.zip".into());}
+        let is_native=original.is_some();
         let persona=match original{
             Some(payload)=>payload,
             None=>experimental_persona_png(&name,&id,&resource_id,png.as_ref().unwrap())?
@@ -245,7 +267,7 @@ impl Registry {
             reg.assets.insert(path,LocalAsset{data:bytes,kind:AssetType::Png});
         }
         reg.items.push(item);
-        Ok(name)
+        Ok((name,is_native))
     }
 }
 #[cfg(test)]
@@ -280,6 +302,8 @@ mod tests{
         pack_zip(&root,"MyCape.zip",Some(r#"{"name":"Red Cape","author":"Example"}"#));
         let reg=Registry::scan(&root);
         assert_eq!(reg.items.len(),1,"{:?}",reg.diagnostics);
+        assert_eq!((reg.discovered_zip,reg.accepted,reg.rejected), (1,1,0));
+        assert_eq!(reg.plaintext_experimental_payloads,1);
         assert_eq!(reg.items[0]["title"],"Red Cape");
         assert_eq!(reg.items[0]["ownership"],"Purchased");
         let id=reg.items[0]["id"].as_str().unwrap();
@@ -309,7 +333,22 @@ mod tests{
         fs::write(root.join("capes/bad.zip"),b"not a zip").unwrap();
         let reg=Registry::scan(&root);
         assert_eq!(reg.items.len(),0);
+        assert_eq!((reg.discovered_zip,reg.accepted,reg.rejected),(1,0,1));
         assert_eq!(reg.diagnostics.len(),1);
+        let _=fs::remove_dir_all(&root);
+    }
+    #[test] fn scan_summary_distinguishes_valid_and_failed_zips() {
+        let root=std::env::temp_dir().join(format!("cosmetics_mix_{}",std::process::id()));
+        let _=fs::remove_dir_all(&root);
+        pack_zip(&root,"working.zip",None);
+        fs::write(root.join("capes/broken.zip"),b"not-zip").unwrap();
+        let registry=Registry::scan(&root);
+        assert_eq!(registry.discovered_zip,2);
+        assert_eq!(registry.accepted,1);
+        assert_eq!(registry.rejected,1);
+        assert_eq!(registry.asset_count(),2);
+        assert_eq!(registry.plaintext_experimental_payloads,1);
+        assert_eq!(registry.native_payloads,0);
         let _=fs::remove_dir_all(&root);
     }
     #[test] fn cape_png_requires_png_signature(){

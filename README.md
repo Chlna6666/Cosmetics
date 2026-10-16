@@ -1,6 +1,6 @@
 # Cosmetics
 
-Version: **0.1.7**. Two Cosmos CDN-backed cape metadata presets are included,
+Version: **0.1.8**. Two Cosmos CDN-backed cape metadata presets are included,
 with **NotOwned** ownership. Their actual Persona ZIPs are **not embedded**
 or republished. The older manifest-only diagnostic ZIP is still available as
 an opt-in protocol probe.
@@ -326,3 +326,38 @@ state. A user-supplied valid native `persona.zip` is transmitted unchanged.
 Neither variant grants real Microsoft entitlements or multiplayer visibility.
 
 See [docs/LOCAL_CAPES.md](docs/LOCAL_CAPES.md).
+
+## v0.1.8: WinHTTP callback isolation and marketplace safety
+
+Minecraft 26.40 diagnostics show `Catalog/Search` returning HTTP 401 while its
+Cosmetics rule is disabled. That is an upstream authorization status, not
+evidence that Cosmetics deliberately rewrote the HTTP body. However older
+Cosmetics builds attached their WinHTTP status callback bridge to *all*
+sessions and connections, including disabled/irrelevant marketplace endpoints.
+
+v0.1.8 keeps the game's original callbacks and flags unchanged for every
+unrelated or disabled request. The bridge is now attached only to the
+individual request handles for active rules and local virtual cape assets.
+Non-target SendRequest, WriteData and ReceiveResponse calls go straight
+to the original functions, and non-target handle state is cleaned on close.
+
+### Marketplace A/B isolation test
+
+To test whether an unexplained upstream HTTP 401 occurs without Cosmetics
+network interception, set ``"enabled": false` at the ROOT of
+`cosmetics.json`, fully exit the game and restart. A successful safe-mode
+startup prints `SAFE_MODE: cosmetics.json enabled=false; WinHTTP hooks NOT installed`.
+This leaves Cosmetics loaded for diagnosis but performs no WinHTTP hooks at all.
+If marketplace search still gets HTTP 401, investigate token/authentication/
+server behavior instead of assuming cape JSON caused it. Re-enable only after
+you have confirmed the baseline.
+
+### Cape loading result is now explicit
+
+`ZIP_SCAN complete discovered=N validated=N rejected=N ...` means local pack
+files were validated and registered in memory. It does NOT say Minecraft
+accepted their Persona payloads. `in_game_loaded=UNVERIFIED` is intentional;
+look for `DressingRoom_Capes` response modification and local resource requests.
+
+Even if marketplace authorization is restored, a generated plaintext Persona
+ZIP is experimental and may still be rejected by the game.

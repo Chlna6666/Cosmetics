@@ -124,6 +124,8 @@ struct Request {
     diagnostic_route: Option<String>,
     catalog_checked: bool,
     body_overflow: bool,
+    intercept_enabled: bool,
+    bridge_installed: bool,
     host: String,
     path: String,
     method: String,
@@ -168,6 +170,10 @@ fn read_wide(p: *const u16) -> String {
     }
 }
 fn state_key(handle: H) -> usize { handle as usize }
+fn should_intercept(cfg:&Config,host:&str,path:&str,method:&str)->bool {
+    cfg.enabled && (host.eq_ignore_ascii_case(persona::LOCAL_HOST)
+        || cfg.match_rule(host,path,method).is_some())
+}
 
 pub unsafe fn spawn_worker(module: H) {
     let _ = DisableThreadLibraryCalls(module);
@@ -192,7 +198,11 @@ unsafe extern "system" fn worker(module: H) -> u32 {
     let _ = RUNTIME.set(Runtime { cfg, root, log: Mutex::new(log) });
     let registry=local_capes::initialize(&RUNTIME.get().unwrap().root);
     logger("============================================================");
-    logger(&format!("local_capes folder=capes loaded={} (no external JSON or Cosmos required)",local_capes::count()));
+    logger(&format!("local_capes ZIP_SCAN complete discovered={} validated={} rejected={} skipped={} registered_items={} registered_assets={} native_persona={} experimental_plaintext={} in_game_loaded=UNVERIFIED",
+        registry.discovered_zip,registry.accepted,registry.rejected,
+        registry.discovered_zip.saturating_sub(registry.accepted+registry.rejected),
+        local_capes::count(),registry.asset_count(),
+        registry.native_payloads,registry.plaintext_experimental_payloads));
     for diagnostic in &registry.diagnostics {logger(&format!("local_capes: {diagnostic}"));}
     logger(&format!("session_start build_version={} module=WinHTTP config_source={config_source} fail_open=true",
         env!("CARGO_PKG_VERSION")));
@@ -202,6 +212,10 @@ unsafe extern "system" fn worker(module: H) -> u32 {
     for rule in &RUNTIME.get().unwrap().cfg.rules {
         logger(&format!("rule={} enabled={} method={} mode={:?}",
             rule.name,rule.enabled,rule.method,rule.mode));
+    }
+    if !RUNTIME.get().unwrap().cfg.enabled {
+        logger("SAFE_MODE: cosmetics.json enabled=false; WinHTTP hooks NOT installed; all requests remain native");
+        return 0;
     }
     if let Err(e) = install() {
         logger(&format!("hook install failed; game remains unmodified: {e}"));
@@ -311,17 +325,39 @@ unsafe extern "system" fn on_open_request(
             rt.cfg.rules.iter().any(|rule|rule.host.eq_ignore_ascii_case(&host)));
         let (host_for_diagnostics,path_for_diagnostics,method_for_diagnostics)=
             (host.clone(),path.clone(),method.clone());
+        // Disabled rules must not alter WinHTTP callbacks or response behavior.
+        let intercept_enabled=RUNTIME.get().is_some_and(|rt|
+            should_intercept(&rt.cfg,&host,&path,&method));
+        let parent_callback=if intercept_enabled && async_session {
+            state.callbacks.get(&state_key(connection)).copied()
+        } else {None};
         let req = Request {
             id, diagnostic_route: diagnostic_route.clone(), catalog_checked:false,
-            body_overflow:false, host, path, method,
+            body_overflow:false,intercept_enabled,bridge_installed:false,
+            host, path, method,
             async_session, request_body:Vec::new(), replay:None,
             capture:None, synthetic:false, status:200, callback_context:0,
         };
-        if let Some(cb)=state.callbacks.get(&state_key(connection)).copied() {
-            state.callbacks.insert(state_key(h),cb);
-        }
         state.requests.insert(state_key(h),req);
         drop(state);
+        // WinHTTP callbacks configured on session/connection are inherited
+        // unchanged. Re-register our bridge ONLY on a selected request handle.
+        // This leaves Catalog/Search and all other marketplace requests alone.
+        if let Some(cb)=parent_callback.filter(|cb|cb.address!=0) {
+            let result=original!(SET_CALLBACK,SetCallbackFn)(
+                h,status_bridge as H,cb.flags|ADDITIONAL_CALLBACK_FLAGS,0);
+            if result as usize!=usize::MAX {
+                let mut state=tables().lock().unwrap_or_else(|e|e.into_inner());
+                state.callbacks.insert(state_key(h),cb);
+                if let Some(req)=state.requests.get_mut(&state_key(h)){
+                    req.bridge_installed=true;
+                }
+                drop(state);
+                debug_log(&format!("request #{id}: callback bridge installed on target request only"));
+            } else {
+                logger(&format!("request #{id}: target callback bridge installation failed; original WinHTTP handler retained"));
+            }
+        }
         if let Some(name)=diagnostic_route {
             logger(&format!("request #{id}: route matched {name}; async={async_session}"));
         } else if is_commerce_host {
@@ -348,12 +384,32 @@ unsafe fn notify_game(h:H,context:usize,status:u32,info:H,len:u32) {
 }
 unsafe extern "system" fn on_set_callback(h:H,callback:H,flags:u32,reserved:usize)->H {
     let real=original!(SET_CALLBACK,SetCallbackFn);
+    let enabled={
+        let state=tables().lock().unwrap_or_else(|e|e.into_inner());
+        state.requests.get(&state_key(h)).is_some_and(|req|req.intercept_enabled)
+    };
+    let is_normal=!callback.is_null() && callback as usize!=usize::MAX;
+    if !enabled {
+        // Parent session/connection and all irrelevant requests remain
+        // exactly as the game registered them: original callback, original
+        // notification mask. Only observe for inheritance by eligible children.
+        let previous=real(h,callback,flags,reserved);
+        if previous as usize!=usize::MAX {
+            let mut state=tables().lock().unwrap_or_else(|e|e.into_inner());
+            if is_normal {
+                state.callbacks.insert(state_key(h),
+                    CallbackRegistration{address:callback as usize,flags});
+            } else {
+                state.callbacks.remove(&state_key(h));
+            }
+        }
+        return previous;
+    }
     let old={
         tables().lock().unwrap_or_else(|e|e.into_inner()).callbacks.get(&state_key(h)).copied()
     };
-    let is_normal=!callback.is_null() && callback as usize!=usize::MAX;
-    let replacement=if is_normal { status_bridge as H } else { callback };
-    let effective_flags=if is_normal {flags|ADDITIONAL_CALLBACK_FLAGS} else {flags};
+    let replacement=if is_normal {status_bridge as H}else{callback};
+    let effective_flags=if is_normal {flags|ADDITIONAL_CALLBACK_FLAGS}else{flags};
     let previous=real(h,replacement,effective_flags,reserved);
     if previous as usize==usize::MAX {return previous;}
     let mut state=tables().lock().unwrap_or_else(|e|e.into_inner());
@@ -362,7 +418,13 @@ unsafe extern "system" fn on_set_callback(h:H,callback:H,flags:u32,reserved:usiz
     } else {
         state.callbacks.remove(&state_key(h));
     }
-    old.map(|r|r.address as H).unwrap_or(previous)
+    if let Some(req)=state.requests.get_mut(&state_key(h)) {
+        req.bridge_installed=is_normal;
+    }
+    // Never expose the internal bridge pointer to the original caller.
+    if previous==status_bridge as H {
+        old.map(|cb|cb.address as H).unwrap_or(ptr::null_mut())
+    } else {previous}
 }
 unsafe fn invoke_headers(h:H,context:usize) {
     notify_game(h,context,STATUS_HEADERS,ptr::null_mut(),0);
@@ -421,6 +483,10 @@ unsafe fn catalog_fast_response(h:H)->bool {
 unsafe extern "system" fn on_send(
     h:H,headers:*const u16,header_len:u32,optional:H,optional_len:u32,total_len:u32,ctx:usize
 )->B {
+    if !tables().lock().unwrap_or_else(|e|e.into_inner())
+        .requests.get(&state_key(h)).is_some_and(|req|req.intercept_enabled) {
+        return original!(SEND,SendFn)(h,headers,header_len,optional,optional_len,total_len,ctx);
+    }
     let mut captured:Option<(u64,String,usize,usize,bool)>=None;
     {
         let mut state=tables().lock().unwrap_or_else(|e|e.into_inner());
@@ -500,6 +566,10 @@ unsafe extern "system" fn on_send(
     sent
 }
 unsafe extern "system" fn on_write(h:H,data:*const c_void,len:u32,written:*mut u32)->B {
+    if !tables().lock().unwrap_or_else(|e|e.into_inner())
+        .requests.get(&state_key(h)).is_some_and(|req|req.intercept_enabled) {
+        return original!(WRITE,WriteFn)(h,data,len,written);
+    }
     // Synthetic Persona downloads are GET-only. No write is ever sent to DNS.
     if tables().lock().unwrap_or_else(|e|e.into_inner())
         .requests.get(&state_key(h)).is_some_and(|r|r.synthetic) {
@@ -751,6 +821,10 @@ unsafe extern "system" fn status_bridge(h:H,context:usize,status:u32,info:H,len:
 }
 
 unsafe extern "system" fn on_receive(h:H,reserved:H)->B {
+    if !tables().lock().unwrap_or_else(|e|e.into_inner())
+        .requests.get(&state_key(h)).is_some_and(|req|req.intercept_enabled) {
+        return original!(RECEIVE,ReceiveFn)(h,reserved);
+    }
     let synthetic={
         let state=tables().lock().unwrap_or_else(|e|e.into_inner());
         state.requests.get(&state_key(h)).filter(|r|r.synthetic)
@@ -974,8 +1048,10 @@ unsafe extern "system" fn on_close(h:H)->B {
     }
     let keep_capture={
         let state=tables().lock().unwrap_or_else(|e|e.into_inner());
-        state.requests.get(&state_key(h)).is_some_and(|r|r.capture.is_some())
-            || state.callbacks.contains_key(&state_key(h))
+        // Unbridged game callbacks do not route HANDLE_CLOSING through us.
+        // Never retain disabled/unrelated marketplace request handles.
+        state.requests.get(&state_key(h))
+            .is_some_and(|r|r.intercept_enabled && r.bridge_installed)
     };
     if !keep_capture {
         let mut state=tables().lock().unwrap_or_else(|e|e.into_inner());
@@ -985,4 +1061,33 @@ unsafe extern "system" fn on_close(h:H)->B {
         state.callbacks.remove(&state_key(h));
     }
     original!(CLOSE,CloseFn)(h)
+}
+
+#[cfg(test)]
+mod isolation_tests {
+    use super::*;
+    #[test]
+    fn disabled_marketplace_routes_are_never_intercepted(){
+        let cfg:Config=serde_json::from_str(r#"{
+            "rules":[
+                {"name":"search","enabled":false,"host":"20ca2.playfabapi.com",
+                 "path":"/Catalog/Search","method":"POST","mode":"append_array"},
+                {"name":"capes","enabled":true,"host":"store.mktpl.minecraft-services.net",
+                 "path":"/api/v2.0/layout/pages/DressingRoom_Capes",
+                 "method":"POST","mode":"append_array"}
+            ]}"#).unwrap();
+        assert!(!should_intercept(&cfg,"20ca2.playfabapi.com","/Catalog/Search","POST"));
+        assert!(!should_intercept(&cfg,"20ca2.playfabapi.com","/SomethingElse","POST"));
+        assert!(should_intercept(&cfg,"store.mktpl.minecraft-services.net",
+            "/api/v2.0/layout/pages/DressingRoom_Capes","POST"));
+        assert!(should_intercept(&cfg,"cosmetics.invalid",
+            "/personabinary/00000000-0000-4000-8000-000000000001.zip","GET"));
+        let off:Config=serde_json::from_str(r#"{"enabled":false,"rules":[
+            {"name":"capes","enabled":true,"host":"store.mktpl.minecraft-services.net",
+             "path":"/api/v2.0/layout/pages/DressingRoom_Capes",
+             "method":"POST","mode":"append_array"}]}"#).unwrap();
+        assert!(!should_intercept(&off,"store.mktpl.minecraft-services.net",
+            "/api/v2.0/layout/pages/DressingRoom_Capes","POST"));
+        assert!(!should_intercept(&off,"cosmetics.invalid","/personabinary/test.zip","GET"));
+    }
 }

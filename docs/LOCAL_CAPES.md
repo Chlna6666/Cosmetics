@@ -109,3 +109,18 @@ If the first line shows 0, check ZIP entries are at root level and the file
 extension is ZIP. In the Minecraft HTTP trace, \`action=replace_json\` means
 the generated items were inserted; \`client_read_complete\` shows the modified
 HTTP response was consumed, not that the cape was equipped.
+
+
+## ZIP 统计与市场回归验证
+
+v0.1.8 会记录：
+
+```text
+[Cosmetics] local_capes ZIP_SCAN complete discovered=2 validated=1 rejected=1 skipped=0 registered_items=1 registered_assets=2 native_persona=0 experimental_plaintext=1 in_game_loaded=UNVERIFIED
+[Cosmetics] local_capes: ZIP_VALIDATED working.zip: working payload=experimental_plaintext_png
+[Cosmetics] local_capes: ZIP_REJECTED broken.zip: invalid outer ZIP
+```
+
+以上仅表示本地资源在内存中注册成功，并不表示游戏市场/更衣室接受它。
+如果市场返回 401，先用根节点 `enabled=false` 禁用全部 Hook 做 A/B
+再继续验证本地披风，避免将鉴权失败归因于图片解析。
