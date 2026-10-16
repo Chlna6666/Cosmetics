@@ -1,6 +1,9 @@
 # Cosmetics
 
-Version: **0.1.1 diagnostic build**. Built-in sample is intentionally NOT an equipable cape.
+Version: **0.1.2**. Two Cosmos CDN-backed cape metadata presets are included,
+with **NotOwned** ownership. Their actual Persona ZIPs are **not embedded**
+or republished. The older manifest-only diagnostic ZIP is still available as
+an opt-in protocol probe.
 
 Minecraft Bedrock (Windows) standalone native **Rust DLL** for cosmetic dressing-room
 HTTP response overlays. This is a research build, not a proven cape unlocker.
@@ -65,9 +68,10 @@ query string), and HTTP verb. Only active rules are processed.
 | `/Catalog/GetPublishedItem` | active | Override responses for exact, explicitly registered local item IDs |
 | `/Catalog/Search` | inactive | Experimental catalog list extension |
 
-The release includes one **NotOwned test cape entry** by default to verify
-the Dressing Room route. This is not a real wearable cape and does not grant
-ownership. To disable the diagnostic item, set `overrides/capes_items.json`
+The release includes two **NotOwned Cosmos cape entries** by default to verify
+the Dressing Room route: Android Cape and Minecon 2011 Cape. Both reference
+the Cosmos asset CDN, and do not grant ownership. A separate manifest-only
+diagnostic ZIP is retained, but not added to the default cape menu. To disable the diagnostic item, set `overrides/capes_items.json`
 to `[]`. Read [docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md) for expected logs.
 
 Array overlay files contain a JSON array. Empty arrays mean **no change**.
@@ -162,3 +166,29 @@ CI cannot replace UWP/GDK tests on the actual game.
 ## License
 
 GPL-3.0-only. This repository retains its existing GPL-3.0 license.
+
+## Cosmos resource integration
+
+Cosmetics follows the response schema of [Bedrock.Cosmos](https://github.com/BE-Community-Dev/Bedrock.Cosmos/)
+and the factual item-ID / Persona UUID / ZIP URL relationships of
+[Bedrock-Cosmos/Responses](https://github.com/Bedrock-Cosmos/Responses).
+
+The package includes **two original metadata templates**, not third-party
+binary assets or wholesale copies of the upstream response database. The
+source repositories do not expose a clear repository-wide license for
+redistributing their complete response collection and cape ZIP bytes.
+
+For a larger *local-only* collection, use the bundled opt-in importer:
+
+```powershell
+py scripts/import_cosmos.py --destination . --limit 15
+```
+
+This imports selected Cosmos cape metadata and PlayFab item responses, sets
+imported ownership to `NotOwned`, and preserves the user's existing entries.
+To download ZIPs into `overrides/persona` for your private environment,
+there is a separate rights-confirmed option. Read
+[docs/COSMOS_IMPORT.md](docs/COSMOS_IMPORT.md).
+
+**Local metadata is not a server entitlement.** Neither importer nor DLL
+modifies the real inventory, receipts, or Minecraft's existing Persona cache.

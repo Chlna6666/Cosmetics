@@ -117,6 +117,22 @@ pub fn overlay(
                 }
             }
             if added == 0 { return Ok(None); }
+            // Cosmos places capes in an itemListComp. A successful append must
+            // update both the item count and the render limit or the new items
+            // may remain invisible although JSON replacement succeeded.
+            if let Some(parent_path)=rule.pointer.strip_suffix("/items") {
+                if let Some(parent)=root.pointer_mut(parent_path).and_then(Value::as_object_mut) {
+                    if parent.get("type").and_then(Value::as_str)==Some("itemListComp") {
+                        let count=parent.get("items").and_then(Value::as_array)
+                            .map(|items|items.len()).unwrap_or(0);
+                        parent.insert("totalItems".into(),Value::from(count));
+                        if let Some(config)=parent.get_mut("customStoreRowConfiguration")
+                            .and_then(Value::as_object_mut) {
+                            config.insert("maxOffers".into(),Value::from(count));
+                        }
+                    }
+                }
+            }
             serde_json::to_vec(&root).map(Some).map_err(|e| e.to_string())
         }
         Mode::CatalogItem => {
@@ -210,6 +226,23 @@ mod tests {
         let unknown = br#"{"itemid":"00000000-0000-0000-0000-000000000001"}"#;
         assert!(overlay(&dir, &rule, unknown, original).unwrap().is_none());
         let _ = fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn list_append_updates_render_limit_and_keeps_original_entries() {
+        let dir=std::env::temp_dir().join(format!("cosmetics_item_list_{}",std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("items.json"),r#"[{"id":"new"}]"#).unwrap();
+        let mut rule=append();
+        rule.pointer="/result/layout/0/rows/0/components/0/items".into();
+        let original=br#"{"result":{"layout":[{"rows":[{"components":[{"type":"itemListComp","items":[{"id":"owned","ownership":"Purchased"}],"totalItems":1,"customStoreRowConfiguration":{"maxOffers":1}}]}]}]}}"#;
+        let modified=overlay(&dir,&rule,b"",original).unwrap().unwrap();
+        let value:Value=serde_json::from_slice(&modified).unwrap();
+        let component=&value["result"]["layout"][0]["rows"][0]["components"][0];
+        assert_eq!(component["totalItems"],2);
+        assert_eq!(component["customStoreRowConfiguration"]["maxOffers"],2);
+        assert_eq!(component["items"][0]["ownership"],"Purchased");
+        assert_eq!(component["items"][1]["id"],"new");
+        let _=fs::remove_dir_all(dir);
     }
     #[test]
     fn catalog_request_state_is_redacted_and_classifies_body() {

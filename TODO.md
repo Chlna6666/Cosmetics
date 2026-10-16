@@ -34,3 +34,13 @@ No automatic CI code rewriting. Do not overwrite genuine owned cape
 entries, mutate server receipts, or replace the complete original inventory.
 Leave unrecognized responses alone. No assumption that a fake inventory
 entry grants server-side ownership.
+
+## Cosmos metadata integration (0.1.2)
+- [x] Verify upstream Cosmetics/Cosmos page and catalog metadata schema
+- [x] Update itemListComp totalItems and customStoreRowConfiguration.maxOffers on append
+- [x] Support explicitly allowlisted Cosmos HTTPS ZIP metadata without a local proxy
+- [x] Package two minimal NotOwned Cosmos item mappings (Android/Minecon 2011)
+- [x] Provide an opt-in local resource/mapping importer; don't redistribute unknown-license upstream ZIPs
+- [ ] Verify original Minecraft UI navigation / Persona equipment with real packages
+- [ ] Confirm downloaded ZIP signatures, accepted manifest format, and cache reuse in both UWP/GDK
+- [ ] Fix and validate async callback lifecycle under concurrent independent WinHTTP clients

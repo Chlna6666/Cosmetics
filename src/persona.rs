@@ -53,20 +53,29 @@ pub fn load(root: &Path, path: &str) -> Result<Option<ZipPayload>, String> {
     Ok(Some(ZipPayload { bytes, resource_uuid: id.to_string() }))
 }
 
-/// Guard a PlayFab response so its download URLs cannot send game credentials
-/// to arbitrary hosts. Local synthetic URLs are explicitly opt-in.
+/// Accept either explicit local virtual resources or Cosmos' narrowly scoped
+/// asset CDN. Metadata is never an entitlement and external ZIP bytes are not
+/// downloaded or mirrored by Cosmetics itself.
 pub fn validate_local_catalog_urls(value: &Value) -> Result<(), String> {
-    let item = value.pointer("/data/Item").ok_or("missing data.Item")?;
-    let contents = item.get("Contents").and_then(Value::as_array)
-        .ok_or("no Contents")?;
-    if contents.is_empty() { return Err("empty Contents".into()); }
-    for content in contents {
-        let url = content.get("Url").and_then(Value::as_str).ok_or("missing Url")?;
-        let path = url.strip_prefix("https://cosmetics.invalid")
-            .ok_or("Persona ZIP must use the local synthetic HTTPS host")?;
-        if resource_uuid(path).is_none() { return Err("invalid Persona resource path".into()); }
-        if content.get("Type").and_then(Value::as_str) != Some("personabinary") {
+    let item=value.pointer("/data/Item").ok_or("missing data.Item")?;
+    let contents=item.get("Contents").and_then(Value::as_array).ok_or("missing Contents")?;
+    if contents.is_empty() {return Err("empty Contents".into());}
+    for resource in contents {
+        if resource.get("Type").and_then(Value::as_str)!=Some("personabinary") {
             return Err("Persona resource type must be personabinary".into());
+        }
+        let url=resource.get("Url").and_then(Value::as_str).ok_or("missing Url")?;
+        if let Some(path)=url.strip_prefix("https://cosmetics.invalid") {
+            if resource_uuid(path).is_none() {return Err("invalid local Persona URL".into());}
+        } else if let Some(name)=url.strip_prefix("https://capes.bedrock-cosmos.app/zips/") {
+            // An allowlisted external host still performs normal TLS validation,
+            // unlike the virtual host. No token/credential forwarding here.
+            if !name.ends_with(".zip") || name.len()>160 || name.len()<5
+                || !name.bytes().all(|b|b.is_ascii_alphanumeric()||b"_-.".contains(&b)) {
+                return Err("invalid Cosmos CDN package name".into());
+            }
+        } else {
+            return Err("catalog URL is neither local virtual host nor supported Cosmos ZIP CDN".into());
         }
     }
     Ok(())
@@ -86,6 +95,12 @@ mod tests {
         assert!(validate_local_catalog_urls(&good).is_ok());
         let mut bad=good.clone();
         bad["data"]["Item"]["Contents"][0]["Url"]=Value::String("https://example.net/surprise.zip".into());
+        assert!(validate_local_catalog_urls(&bad).is_err());
+        bad["data"]["Item"]["Contents"][0]["Url"]=Value::String(
+            "https://capes.bedrock-cosmos.app/zips/AndroidCape.zip".into());
+        assert!(validate_local_catalog_urls(&bad).is_ok());
+        bad["data"]["Item"]["Contents"][0]["Url"]=Value::String(
+            "https://capes.bedrock-cosmos.app/zips/../private.zip".into());
         assert!(validate_local_catalog_urls(&bad).is_err());
     }
 }
