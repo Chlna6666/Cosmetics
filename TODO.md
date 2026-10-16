@@ -61,3 +61,10 @@ entry grants server-side ownership.
 - [x] Add unbounded importer mode and parallel metadata fetch with progress
 - [ ] Verify Bedrock 26.40 POST page JSON schema against live response
 - [ ] Verify end-to-end client read and actual Persona equipability
+## v0.1.6 local official wardrobe
+- [x] Inspect Cosmos entitlement forwarding and separate remote backend boundary
+- [x] Add opt-in verified official item ID list for local-owned UI projection
+- [x] Keep original non-ownership item fields and existing inventory receipts intact
+- [x] Add read-only opt-in original inventory schema probe
+- [ ] Verify actual game equipment, signatures and persistence after restarting the client
+- [ ] Derive actual inventory schema from consented redacted fixture before any local entitlement overlay

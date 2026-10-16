@@ -35,7 +35,18 @@ pub fn json_summary(bytes: &[u8]) -> String {
     let item_state=if json.pointer("/data/Item").is_some() {"present"}else{"absent"};
     let response_items=json.pointer("/result/items").and_then(Value::as_array)
         .map_or(0,|x|x.len());
-    format!("json={kind} bytes={} layout_rows={rows} item_lists={lists} listed_items={items} inventory_array_len={response_items} catalog_item={item_state}",bytes.len())
+    let purchased_local_capes=json.pointer("/result/layout")
+        .and_then(Value::as_array)
+        .map(|layouts|layouts.iter()
+            .flat_map(|layout|layout.get("rows").and_then(Value::as_array).into_iter().flatten())
+            .flat_map(|row|row.get("components").and_then(Value::as_array).into_iter().flatten())
+            .flat_map(|component|component.get("items").and_then(Value::as_array).into_iter().flatten())
+            .filter(|item|item.get("creatorName").and_then(Value::as_str)==Some("Minecraft")
+                && item.get("pieceType").and_then(Value::as_str)==Some("persona_capes")
+                && item.get("ownership").and_then(Value::as_str)==Some("Purchased"))
+            .count())
+        .unwrap_or(0);
+    format!("json={kind} bytes={} layout_rows={rows} item_lists={lists} listed_items={items} inventory_array_len={response_items} purchased_minecraft_capes_ui={purchased_local_capes} catalog_item={item_state}",bytes.len())
 }
 pub fn redact_route_method(method: &str) -> &'static str {
     match method.to_ascii_uppercase().as_str() {

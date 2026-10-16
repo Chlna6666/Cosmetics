@@ -11,7 +11,8 @@
       "mode": "append_array",
       "pointer": "/result/layout/0/rows/1/components/1/items",
       "identity_key": "id",
-      "file": "overrides/capes_items.json"
+      "file": "overrides/capes_items.json",
+      "official_preview_ids": "overrides/official_cape_preview_ids.json"
     },
     {
       "name": "persona_profile",
@@ -54,15 +55,12 @@
       "file": "overrides/custom_capes_page.json"
     },
     {
-      "name": "official_inventory_preserving_append",
+      "name": "official_inventory_schema_probe",
       "enabled": false,
       "host": "entitlements.mktpl.minecraft-services.net",
       "method": "GET",
       "path": "/api/v1.0/player/inventory?includeReceipt=true",
-      "mode": "append_array",
-      "pointer": "/result/items",
-      "identity_key": "id",
-      "file": "overrides/inventory_items.json"
+      "mode": "inventory_probe"
     },
     {
       "name": "catalog_custom_item_metadata",

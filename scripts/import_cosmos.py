@@ -106,7 +106,7 @@ def validate_catalog(item_id, catalog):
 
 
 def import_catalog(directory, max_count=None, keyword="", bundle_zips=False, include_unmapped=False,
-                   workers=8):
+                   workers=8, official_preview=False):
     directory = Path(directory).resolve()
     page = load_json(remote("MainPages/Capes.json"))
     mapping = parse_mappings(load_json(remote("LauncherJsons/PlayfabGetPublishItemResponses.json")))
@@ -183,6 +183,26 @@ def import_catalog(directory, max_count=None, keyword="", bundle_zips=False, inc
     if failures:
         print(f"WARNING: {failures} item(s) failed metadata validation; retry importer.",flush=True)
     print("ZIP assets still use Cosmos HTTPS CDN; no Microsoft entitlements changed.",flush=True)
+    if official_preview:
+        # Only verified, existing upstream items from Minecraft, with valid
+        # PlayFab catalog mappings. This is a client-side wardrobe projection.
+        selected_ids=sorted({
+            item["id"] for item,_ in checked
+            if item.get("creatorName")=="Minecraft"
+            and item.get("pieceType")=="persona_capes"
+        })
+        path=directory/"overrides"/"official_cape_preview_ids.json"
+        path.parent.mkdir(parents=True,exist_ok=True)
+        # Merge existing selections unless an explicit user choice removes them.
+        old_ids=[]
+        if path.is_file():
+            old_ids=json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(old_ids,list):
+                raise ValueError("existing official_cape_preview_ids.json must be an array")
+        selected_ids=sorted(set(selected_ids).union(x for x in old_ids if isinstance(x,str) and UUID.fullmatch(x)))
+        path.write_text(json.dumps(selected_ids,indent=2)+"\n",encoding="utf-8")
+        print(f"Official local-only wardrobe projection: {len(selected_ids)} allowlisted Minecraft capes.",flush=True)
+        print("This changes only the locally rendered ownership label; it does NOT grant Microsoft server entitlements.",flush=True)
 
     if bundle_zips:
         directory_zip=directory/"overrides"/"persona"
@@ -216,6 +236,8 @@ def main():
                         help="Also display upstream cape IDs without local PlayFab mappings; may be unusable")
     parser.add_argument("--workers", type=int, default=8, help="Parallel metadata requests (1-16)")
     parser.add_argument("--name", default="", help="Only titles containing this text")
+    parser.add_argument("--official-preview", action="store_true",
+                        help="Opt in to local-only Purchased UI projection for catalog-verified Minecraft capes; no server entitlement")
     parser.add_argument("--bundle-zips", action="store_true",
                         help="Download upstream ZIPs into local overrides/persona for use on this machine")
     parser.add_argument("--confirm-asset-rights", action="store_true",
@@ -228,7 +250,7 @@ def main():
     if args.bundle_zips and not args.confirm_asset_rights:
         parser.error("--bundle-zips requires --confirm-asset-rights")
     import_catalog(args.destination, None if args.all or args.limit==0 else args.limit,
-                   args.name,args.bundle_zips,args.include_unmapped,args.workers)
+                   args.name,args.bundle_zips,args.include_unmapped,args.workers,args.official_preview)
 
 
 if __name__ == "__main__":

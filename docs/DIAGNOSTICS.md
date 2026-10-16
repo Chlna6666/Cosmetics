@@ -123,3 +123,15 @@ If the packaged `cosmetics.json` was not updated, older local rules take precede
 成功命中后应依次观察 `route matched`、`RESPONSE_HEADERS_CAPTURED`、
 `RESPONSE_CAPTURED`、`RESPONSE_REPLACED`、`CLIENT_CONSUMED_OVERLAY`。
 仍有异常时根据新日志排查 JSON schema，而不是继续将问题归因于未安装 Hook。
+## v0.1.6：官方披风 UI 状态与库存探针
+
+在 `--official-preview` 生成白名单以后，更衣室 UI 修改前后的
+`UPSTREAM_JSON`、`MODIFIED_JSON` 日志会包含
+`purchased_minecraft_capes_ui=N` 计数差异。
+计数代表被 UI 标记为 Purchased 的 Minecraft 披风数量，
+**不能解释为真实账号拥有或游戏装备成功**。
+
+只读库存探针（默认关闭）：
+`official_inventory_schema_probe`。启用后捕获并输出脱敏布局摘要，
+完整原始库存数据、Authorization、收据不落盘、不上传第三方 API。
+当前 Cosmos 的远端 `/api/v1.0/player/inventory` 修改算法不在公开仓库中。

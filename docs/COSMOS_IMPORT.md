@@ -119,3 +119,32 @@ py scripts/import_cosmos.py --destination . --all
 **游戏 26.40 的实际页面方法是 POST，不是 GET。**
 如果仍使用旧 cosmetics.json，就算更新 DLL 也会漏掉
 `DressingRoom_Capes` 与 `DressingRoom_PersonaProfile`。
+## v0.1.6 官方披风本地预览（可选）
+
+Cosmos 的公开源码通过三个环节工作：页面 JSON、PlayFab 商品元数据、
+以及调用 **独立且未公开实现的** bedrock-cosmos.app 权益 API。
+Cosmetics 不会向这个远端 API 上传你的库存 JSON，也不会制造可信购买收据。
+
+运行下列命令，将经过商品映射验证的 Minecraft 官方披风额外加入
+**仅在本机生效的更衣室 Purchased 状态白名单**：
+
+```powershell
+py scripts/import_cosmos.py --destination . --all --official-preview
+```
+
+导入器会创建 `overrides/official_cape_preview_ids.json`。
+Cosmetics 对命中的 `DressingRoom_Capes` 页面只修改白名单中的
+`creatorName: Minecraft` 且 `pieceType: persona_capes` 项的
+`ownership` UI 字段，不会覆盖原有收据和其他属性。
+自定义披风仍为 NotOwned。
+
+禁用此实验：将 `overrides/official_cape_preview_ids.json` 改成 `[]`
+或删除该文件，然后重新启动 Minecraft。
+
+**注意：Purchased UI 标签不是微软账号的真实权益，也不是有效签名。**
+能否穿戴、同步或在多人游戏展示，需要游戏实机验证；本功能不修改
+`player/inventory`，也不保证解锁受限制的官方披风。
+
+如需只读调试原版库存 JSON 的结构，可在 `cosmetics.json` 把
+`official_inventory_schema_probe.enabled` 改为 true。
+这会额外缓存响应并记录脱敏结构摘要，默认关闭。

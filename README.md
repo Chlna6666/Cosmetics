@@ -1,6 +1,6 @@
 # Cosmetics
 
-Version: **0.1.5**. Two Cosmos CDN-backed cape metadata presets are included,
+Version: **0.1.6**. Two Cosmos CDN-backed cape metadata presets are included,
 with **NotOwned** ownership. Their actual Persona ZIPs are **not embedded**
 or republished. The older manifest-only diagnostic ZIP is still available as
 an opt-in protocol probe.
@@ -258,3 +258,42 @@ make their Persona ZIPs available or grant ownership.
 
 The importer adds to existing files and prints verification progress. Update
 both `Cosmetics.dll` and `cosmetics.json` from the same 0.1.5 artifact.
+## 0.1.6 Cosmos-style official cape client-side preview
+
+Bedrock.Cosmos implements three separate parts: custom Dressing Room page
+responses, local PlayFab catalog response substitution, and a response from
+its **closed, separate website API** for Minecraft player inventory. The
+public code for the last part simply POSTs the original inventory body to
+`https://bedrock-cosmos.app/api/v1.0/player/inventory?includeReceipt=true`.
+This repository does not contact that service, forward private inventory
+JSON or attempt to mint authenticated purchase receipts.
+
+**Opt-in local official cape ownership display:**
+
+```powershell
+py scripts/import_cosmos.py --destination . --all --official-preview
+```
+
+This imports mapped Cosmos items and creates
+`overrides/official_cape_preview_ids.json`. It allows the DLL to mark only
+allowlisted `Minecraft` creator + `persona_capes` items as `Purchased`
+**in the local Dressing Room HTTP page only**. No original inventory,
+receipt, signature, user entitlement or external server state changes.
+Existing items retain every other field. Creator capes are left unchanged.
+An empty or missing allowlist switches the UI ownership projection off.
+
+**Important:** this is a client-side owned-state experiment, not a genuine
+official cape purchase or a guarantee of preview/equipment/multiplayer
+visibility. The game may independently verify entitlement and package
+signatures and reject the local wardrobe state.
+
+An optional read-only `official_inventory_schema_probe` rule is present,
+**disabled by default**. It records aggregate JSON shape without changing
+the server response; it helps analyze the unknown inventory API schema.
+Turning it on buffers inventory data locally and increases overhead. It
+does not send data to Cosmos or any other third-party service.
+
+Source implementation references:
+- BedrockCosmos.Core/Proxy/ProxyController.cs: OnResponse, HandleEntitlementsRequest
+- BedrockCosmos.Core/App/AsyncHttpOperations.cs: GetCosmosEntitlementsAsync
+- Bedrock-Cosmos/Responses/MainPages/Capes.json

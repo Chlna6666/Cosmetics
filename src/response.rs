@@ -36,7 +36,7 @@ pub struct Config {
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum Mode { AppendArray, CatalogItem, ReplaceJson, PersonaProfile }
+pub enum Mode { AppendArray, CatalogItem, ReplaceJson, PersonaProfile, InventoryProbe }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Rule {
@@ -56,6 +56,10 @@ pub struct Rule {
     pub identity_key: String,
     #[serde(default)]
     pub catalog_directory: String,
+    /// Optional local-only UI projection of official cape ownership.
+    /// This never produces entitlement receipts or mutates the inventory API.
+    #[serde(default)]
+    pub official_preview_ids: String,
 }
 
 impl Config {
@@ -84,6 +88,21 @@ fn guarded_path(base: &Path, child: &str) -> Result<PathBuf, String> {
         return Err("拒绝非相对安全资源路径".into());
     }
     Ok(base.join(relative))
+}
+
+/// Change UI-only ownership on an allowlisted Minecraft cape.
+/// Does not add inventory entries, purchase receipts, signatures or claims.
+fn preview_official_cape(item:&mut Value,key:&str,ids:&HashSet<String>)->bool {
+    let Some(id)=item.get(key).and_then(Value::as_str) else{return false};
+    if !ids.contains(&id.to_ascii_lowercase()){return false;}
+    if item.get("creatorName").and_then(Value::as_str)!=Some("Minecraft")
+        || item.get("pieceType").and_then(Value::as_str)!=Some("persona_capes"){
+        return false;
+    }
+    if item.get("ownership").and_then(Value::as_str)==Some("Purchased"){return false;}
+    let Some(obj)=item.as_object_mut() else{return false};
+    obj.insert("ownership".to_string(),Value::from("Purchased"));
+    true
 }
 
 /// Return None when no local overlay is configured or its item ID is unknown.
@@ -160,6 +179,7 @@ pub fn overlay(
             if inserted==0 {return Ok(None);}
             serde_json::to_vec(&root).map(Some).map_err(|e|e.to_string())
         }
+        Mode::InventoryProbe => Ok(None),
         Mode::AppendArray => {
             let path = guarded_path(base, &rule.file)?;
             let data=match fs::read(&path) {
@@ -172,7 +192,24 @@ pub fn overlay(
             let additions: Value = serde_json::from_slice(&data)
                 .map_err(|e| format!("overlay JSON: {e}"))?;
             let add = additions.as_array().ok_or("overlay must be a JSON array")?;
-            if add.is_empty() { return Ok(None); }
+            // Explicit allowlist produced by the user's optional Cosmos importer.
+            // Empty/missing list disables local UI ownership presentation.
+            let official_preview_ids:HashSet<String> = if rule.official_preview_ids.is_empty() {
+                HashSet::new()
+            } else {
+                let file=guarded_path(base,&rule.official_preview_ids)?;
+                match fs::read(&file) {
+                    Ok(raw) => {
+                        let ids:Vec<String>=serde_json::from_slice(&raw)
+                            .map_err(|e|format!("invalid official preview ids: {e}"))?;
+                        ids.into_iter().filter(|s|is_uuid(s))
+                            .map(|s|s.to_ascii_lowercase()).collect()
+                    }
+                    Err(e) if e.kind()==std::io::ErrorKind::NotFound=>HashSet::new(),
+                    Err(e)=>return Err(format!("official preview file read failed: {e}")),
+                }
+            };
+            if add.is_empty() && official_preview_ids.is_empty() {return Ok(None);}
             let mut root: Value = serde_json::from_slice(original_body)
                 .map_err(|e| format!("original JSON invalid: {e}"))?;
             let target = root.pointer_mut(&rule.pointer)
@@ -185,16 +222,24 @@ pub fn overlay(
                 .filter_map(Value::as_str)
                 .map(ToOwned::to_owned)
                 .collect();
-            let mut added = 0usize;
+            // Only change the local wardrobe display ownership field for explicitly
+            // selected Minecraft capes; preserve every original receipt and item field.
+            let mut projected=0usize;
+            for item in target.iter_mut() {
+                if preview_official_cape(item,key,&official_preview_ids) {projected+=1;}
+            }
+            let mut added=0usize;
             for item in add {
-                let identity = item.get(key).and_then(Value::as_str)
-                    .ok_or_else(|| format!("overlay item missing string identity {key}"))?;
+                let identity=item.get(key).and_then(Value::as_str)
+                    .ok_or_else(||format!("overlay item missing string identity {key}"))?;
                 if seen.insert(identity.to_string()) {
-                    target.push(item.clone());
-                    added += 1;
+                    let mut local=item.clone();
+                    if preview_official_cape(&mut local,key,&official_preview_ids) {projected+=1;}
+                    target.push(local);
+                    added+=1;
                 }
             }
-            if added == 0 { return Ok(None); }
+            if added==0 && projected==0 {return Ok(None);}
             // Cosmos places capes in an itemListComp. A successful append must
             // update both the item count and the render limit or the new items
             // may remain invisible although JSON replacement succeeded.
@@ -285,7 +330,7 @@ mod tests {
             host: "example.test".into(), path: "/inventory".into(), method: "GET".into(),
             mode: Mode::AppendArray, pointer: "/result/items".into(),
             file: "items.json".into(), identity_key: "id".into(),
-            catalog_directory: String::new() }
+            catalog_directory: String::new(), official_preview_ids:String::new() }
     }
     #[test]
     fn preserves_original_entitlements_and_deduplicates() {
@@ -341,6 +386,35 @@ mod tests {
         assert_eq!(list["totalItems"],400);
         assert_eq!(list["customStoreRowConfiguration"]["maxOffers"],400);
         let _=fs::remove_dir_all(dir);
+    }
+    #[test]
+    fn official_cape_local_owned_projection_preserves_original_receipts_and_other_items() {
+        let dir=std::env::temp_dir().join(format!("cosmetics_official_{}",std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let original_id="5bba5540-377b-4ec2-9633-4551c4e82e37";
+        let custom_id="e847fc66-b988-4065-bdc9-fa8fd17457b2";
+        fs::write(dir.join("ids.json"),format!(r#"["{original_id}","{custom_id}"]"#)).unwrap();
+        fs::write(dir.join("items.json"),format!(r#"[
+            {{"id":"{custom_id}","creatorName":"Other","pieceType":"persona_capes","ownership":"NotOwned"}}
+        ]"#)).unwrap();
+        let mut rule=append();
+        rule.official_preview_ids="ids.json".into();
+        rule.pointer="/result/layout/0/rows/0/components/0/items".into();
+        let original=format!(r#"{{"result":{{"layout":[{{"rows":[{{"components":[{{"type":"itemListComp","items":[{{"id":"{original_id}","creatorName":"Minecraft","pieceType":"persona_capes","ownership":"NotOwned","receipt":"untouched"}}]}}]}}]}}]}}}}"#);
+        let outcome:Value=serde_json::from_slice(
+            &overlay(&dir,&rule,b"",original.as_bytes()).unwrap().unwrap()).unwrap();
+        let items=outcome.pointer("/result/layout/0/rows/0/components/0/items").unwrap().as_array().unwrap();
+        assert_eq!(items[0]["ownership"],"Purchased");
+        assert_eq!(items[0]["receipt"],"untouched");
+        assert_eq!(items[1]["ownership"],"NotOwned");
+        let _=fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn inventory_probe_is_read_only() {
+        let mut rule=append();
+        rule.mode=Mode::InventoryProbe;
+        let body=br#"{"result":{"items":[{"id":"owned","receipt":"untouched"}]}}"#;
+        assert!(overlay(Path::new("."),&rule,b"",body).unwrap().is_none());
     }
     #[test]
     fn list_append_updates_render_limit_and_keeps_original_entries() {

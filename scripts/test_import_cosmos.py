@@ -62,6 +62,33 @@ class ImportTests(unittest.TestCase):
             self.assertTrue(all(x["ownership"]=="NotOwned" for x in found))
             self.assertEqual(len(list((Path(td)/"overrides/catalog").glob("*.json"))),35)
 
+    def test_official_preview_creates_only_verified_minecraft_ids(self):
+        a="5bba5540-377b-4ec2-9633-4551c4e82e37"
+        b="e847fc66-b988-4065-bdc9-fa8fd17457b2"
+        page={"result":{"layout":[{"rows":[{"components":[{"type":"itemListComp","items":[
+            {"id":a,"creatorName":"Minecraft","pieceType":"persona_capes","title":"Official"},
+            {"id":b,"creatorName":"Other","pieceType":"persona_capes","title":"Custom"}
+        ]}]}]}]}}
+        mappings=[{"uuid":a,"response":"Persona/VanillaCapes/A.json"},
+                  {"uuid":b,"response":"Persona/CustomCapes/B.json"}]
+        def mock_remote(path):
+            if path=="MainPages/Capes.json":return json.dumps(page).encode()
+            if path=="LauncherJsons/PlayfabGetPublishItemResponses.json":
+                return json.dumps(mappings).encode()
+            chosen=a if path.endswith("A.json") else b
+            return json.dumps({"data":{"Item":{"Id":chosen,"Contents":[{
+                "Type":"personabinary",
+                "Url":"https://capes.bedrock-cosmos.app/zips/Test.zip"
+            }]}}}).encode()
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("import_cosmos.remote",side_effect=mock_remote):
+                import_catalog(directory,max_count=None,workers=2,official_preview=True)
+            path=Path(directory)/"overrides/official_cape_preview_ids.json"
+            ids=json.loads(path.read_text())
+            self.assertEqual(ids,[a])
+            entries=json.loads((Path(directory)/"overrides/capes_items.json").read_text())
+            self.assertTrue(all(x["ownership"]=="NotOwned" for x in entries))
+
     def test_only_allowlisted_cdns(self):
         self.assertTrue(safe_zip_url("https://capes.bedrock-cosmos.app/zips/AndroidCape.zip"))
         self.assertFalse(safe_zip_url("https://example.com/zips/AndroidCape.zip"))

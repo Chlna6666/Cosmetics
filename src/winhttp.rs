@@ -204,6 +204,8 @@ unsafe extern "system" fn worker(module: H) -> u32 {
         return 6;
     }
     logger("WinHTTP hooks installed; telemetry=request-route,response-header,overlay-decision,client-read");
+    logger("official_cape_preview: client-only UI projection, not authenticated entitlements");
+    logger("Cosmos remote entitlement API is not contacted; original account receipts remain untouched");
     logger(&format!("debug verbose={} response_shape={}; raw response bodies and credentials are never written",
         RUNTIME.get().unwrap().cfg.debug.verbose,RUNTIME.get().unwrap().cfg.debug.response_shape));
     0
@@ -548,7 +550,7 @@ unsafe fn begin_async_capture(h:H,context:usize)->bool {
         let Some(req)=state.requests.get(&state_key(h)) else{return false};
         if !req.async_session{return false;}
         let Some(rule)=runtime.cfg.match_rule(&req.host,&req.path,&req.method) else{return false};
-        if !matches!(rule.mode,Mode::AppendArray|Mode::PersonaProfile) {return false;}
+        if !matches!(rule.mode,Mode::AppendArray|Mode::PersonaProfile|Mode::InventoryProbe) {return false;}
         rule
     };
     let status=query_number(h,QUERY_STATUS_CODE);
