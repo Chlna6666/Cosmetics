@@ -8,6 +8,8 @@ published in Bedrock-Cosmos/Responses. This permits a real PlayFab
 \`GetPublishedItem\` response to point at the publisher's existing HTTPS
 \`personabinary\` ZIP resource, without a proxy or a local web server.
 
+The two minimal JSON metadata templates are also compiled into Cosmetics.dll
+as built-in fallbacks. A local file of the same name always has priority.
 The actual third-party cape art, signatures, asset ZIPs, full storefront
 pages and other content are not bundled. Neither upstream repository has an
 obvious repository-wide license granting full republication rights for all

@@ -90,8 +90,14 @@ pub fn overlay(
         }
         Mode::AppendArray => {
             let path = guarded_path(base, &rule.file)?;
-            let additions: Value = serde_json::from_slice(&fs::read(&path)
-                .map_err(|e| format!("{}: {e}", path.display()))?)
+            let data=match fs::read(&path) {
+                Ok(data)=>data,
+                Err(e) if e.kind()==std::io::ErrorKind::NotFound
+                    && rule.name=="dressing_room_capes" =>
+                    crate::resources::capes_json().to_vec(),
+                Err(e)=>return Err(format!("{}: {e}",path.display())),
+            };
+            let additions: Value = serde_json::from_slice(&data)
                 .map_err(|e| format!("overlay JSON: {e}"))?;
             let add = additions.as_array().ok_or("overlay must be a JSON array")?;
             if add.is_empty() { return Ok(None); }
@@ -143,9 +149,16 @@ pub fn overlay(
             if !is_uuid(id) { return Ok(None); }
             let folder = guarded_path(base, &rule.catalog_directory)?;
             let path = folder.join(format!("{id}.json"));
-            if !path.is_file() { return Ok(None); }
-            let local: Value = serde_json::from_slice(&fs::read(&path)
-                .map_err(|e| format!("{}: {e}", path.display()))?)
+            let catalog_bytes=match fs::read(&path) {
+                Ok(data)=>data,
+                Err(e) if e.kind()==std::io::ErrorKind::NotFound =>
+                    match crate::resources::catalog_json(id) {
+                        Some(builtin)=>builtin.to_vec(),
+                        None=>return Ok(None),
+                    },
+                Err(e)=>return Err(format!("{}: {e}",path.display())),
+            };
+            let local: Value = serde_json::from_slice(&catalog_bytes)
                 .map_err(|e| format!("catalog JSON invalid: {e}"))?;
             let file_id = local.pointer("/data/Item/Id").and_then(Value::as_str)
                 .ok_or("catalog response missing data.Item.Id")?;
@@ -254,6 +267,24 @@ mod tests {
             catalog_request_state(br#"{"itemid":"5bba5540-377b-4ec2-9633-4551c4e82e37"}"#),
             "valid_itemid"
         );
+    }
+    #[test]
+    fn built_in_cape_catalog_can_fallback_when_external_files_are_missing() {
+        let dir=std::env::temp_dir().join(format!("cosmetics_empty_{}",std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let mut rule=append();
+        rule.name="dressing_room_capes".into();
+        rule.file="overrides/capes_items.json".into();
+        rule.pointer="/result/layout/0/rows/0/components/0/items".into();
+        let original=br#"{"result":{"layout":[{"rows":[{"components":[{"type":"itemListComp","items":[],"totalItems":0}]}]}]}}"#;
+        let result:Value=serde_json::from_slice(&overlay(&dir,&rule,b"",original).unwrap().unwrap()).unwrap();
+        assert_eq!(result["result"]["layout"][0]["rows"][0]["components"][0]["totalItems"],2);
+        rule.mode=Mode::CatalogItem;
+        rule.catalog_directory="overrides/catalog".into();
+        let request=br#"{"itemid":"5bba5540-377b-4ec2-9633-4551c4e82e37"}"#;
+        let response:Value=serde_json::from_slice(&overlay(&dir,&rule,request,b"{}").unwrap().unwrap()).unwrap();
+        assert_eq!(response["data"]["Item"]["Id"],"5bba5540-377b-4ec2-9633-4551c4e82e37");
+        let _=fs::remove_dir_all(&dir);
     }
     #[test]
     fn path_and_host_are_exact_and_catalog_id_is_validated() {

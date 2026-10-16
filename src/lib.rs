@@ -3,6 +3,7 @@
 pub mod response;
 pub mod codec;
 pub mod persona;
+pub mod resources;
 
 #[cfg(windows)]
 mod winhttp;

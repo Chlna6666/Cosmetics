@@ -173,8 +173,11 @@ Cosmetics follows the response schema of [Bedrock.Cosmos](https://github.com/BE-
 and the factual item-ID / Persona UUID / ZIP URL relationships of
 [Bedrock-Cosmos/Responses](https://github.com/Bedrock-Cosmos/Responses).
 
-The package includes **two original metadata templates**, not third-party
-binary assets or wholesale copies of the upstream response database. The
+The package and DLL embed **two minimal Cosmos-compatible metadata templates**,
+not third-party binary assets or wholesale copies of the upstream response database.
+When an external `overrides/capes_items.json` or matching catalog JSON is
+present it takes precedence; otherwise the DLL uses its embedded metadata.
+Using `[]` in the external capes file disables the two presets. The
 source repositories do not expose a clear repository-wide license for
 redistributing their complete response collection and cape ZIP bytes.
 
