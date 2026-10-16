@@ -44,3 +44,11 @@ entry grants server-side ownership.
 - [ ] Verify original Minecraft UI navigation / Persona equipment with real packages
 - [ ] Confirm downloaded ZIP signatures, accepted manifest format, and cache reuse in both UWP/GDK
 - [ ] Fix and validate async callback lifecycle under concurrent independent WinHTTP clients
+
+## v0.1.4 debug capture
+
+- [x] Verbose and response_shape configuration switches (on by default in development)
+- [x] Emit request lifecycle diagnostics to file and Windows debugger
+- [x] Separate upstream capture, JSON overlay creation and client consumption
+- [x] Summarize JSON shape without leaking account inventory and credentials
+- [ ] Validate lifecycle and Persona acceptance against Bedrock UWP/GDK

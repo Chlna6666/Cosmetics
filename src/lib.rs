@@ -2,6 +2,7 @@
 //! The response engine can be tested on any platform; hooks are Windows-only.
 pub mod response;
 pub mod diagnostics;
+pub mod debug;
 pub mod codec;
 pub mod persona;
 pub mod resources;

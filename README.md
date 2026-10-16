@@ -1,6 +1,6 @@
 # Cosmetics
 
-Version: **0.1.3**. Two Cosmos CDN-backed cape metadata presets are included,
+Version: **0.1.4**. Two Cosmos CDN-backed cape metadata presets are included,
 with **NotOwned** ownership. Their actual Persona ZIPs are **not embedded**
 or republished. The older manifest-only diagnostic ZIP is still available as
 an opt-in protocol probe.
@@ -212,3 +212,28 @@ The PersonaProfile screen now has a dedicated optional navigation tile to
 `DressingRoom_Capes`, integrated using the upstream Cosmos `StoreRow` / dropdown
 0 structure. Disable `persona_profile` in cosmetics.json to suppress it. Existing
 owned items and inventory are not replaced.
+
+## v0.1.4 development capture trace
+
+Development tracing is enabled by default:
+
+```json
+"debug": {"verbose": true, "response_shape": true}
+```
+
+The module writes `logs/cosmetics.log` beside the DLL and emits
+`[Cosmetics DEBUG]` through Windows `OutputDebugStringW` (DebugView / Visual
+Studio debugger output). No BLoader, TLS proxy, console or certificate is needed.
+
+Events include `REQUEST_CAPTURED`, `SEND_RESULT`, `RESPONSE_HEADERS_CAPTURED`,
+`RESPONSE_CAPTURED`, `UPSTREAM_JSON`, `RESPONSE_REPLACED`, `MODIFIED_JSON`,
+`CLIENT_CONSUMED_OVERLAY`, and `HANDLE_CLOSE` for matched API requests.
+
+JSON debug summaries show aggregate layout counts, item-list counts, lengths
+and whether `data.Item` exists. They deliberately do not include original JSON,
+account IDs, tokens, inventories, receipts, or unredacted URLs. `RESPONSE_REPLACED`
+confirms the DLL generated response bytes, while `CLIENT_CONSUMED_OVERLAY` confirms
+WinHTTP delivered them, **not** that Minecraft accepted a cape as equipable.
+
+Set `debug.verbose=false` for less logging, or `debug.response_shape=false`
+to avoid additional development-only JSON inspection costs.

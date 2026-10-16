@@ -11,6 +11,16 @@ fn default_limit() -> usize { 4 * 1024 * 1024 }
 fn default_method() -> String { "GET".into() }
 fn default_identity() -> String { "id".into() }
 fn default_enabled() -> bool { true }
+#[derive(Debug, Deserialize, Clone)]
+pub struct DebugConfig {
+    #[serde(default = "default_enabled")]
+    pub verbose: bool,
+    #[serde(default = "default_enabled")]
+    pub response_shape: bool,
+}
+impl Default for DebugConfig {
+    fn default() -> Self { Self { verbose:true, response_shape:true } }
+}
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
@@ -18,6 +28,8 @@ pub struct Config {
     pub enabled: bool,
     #[serde(default = "default_limit")]
     pub max_capture_bytes: usize,
+    #[serde(default)]
+    pub debug: DebugConfig,
     #[serde(default)]
     pub rules: Vec<Rule>,
 }
@@ -363,6 +375,13 @@ mod tests {
         assert_eq!(catalog_id(br#"{"token":"5bba5540-377b-4ec2-9633-4551c4e82e37"}"#),
             Err("missing_itemid"));
         assert_eq!(catalog_id(br#"{"itemid":"bad"}"#),Err("invalid_itemid"));
+    }
+    #[test]
+    fn debug_defaults_enabled_and_can_be_disabled(){
+        let c:Config=serde_json::from_str(r#"{"rules":[]}"#).unwrap();
+        assert!(c.debug.verbose && c.debug.response_shape);
+        let d:Config=serde_json::from_str(r#"{"debug":{"verbose":false,"response_shape":false}}"#).unwrap();
+        assert!(!d.debug.verbose && !d.debug.response_shape);
     }
     #[test]
     fn catalog_request_state_is_redacted_and_classifies_body() {

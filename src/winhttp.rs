@@ -1,7 +1,7 @@
 //! Native WinHTTP responses: bounded sync buffering, async callback capture,
 //! and opt-in virtual local Persona ZIP resources. No TLS interception and no BLoader.
 use crate::response::{Config, Mode};
-use crate::{codec, persona, diagnostics};
+use crate::{codec, persona, diagnostics, debug};
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::fs::{self, File, OpenOptions};
@@ -46,6 +46,7 @@ extern "system" {
     fn DisableThreadLibraryCalls(module: H) -> B;
     fn SetLastError(code: u32);
     fn GetLastError() -> u32;
+    fn OutputDebugStringW(text:*const u16);
 }
 
 type OpenFn = unsafe extern "system" fn(*const u16,u32,*const u16,*const u16,u32)->H;
@@ -90,9 +91,22 @@ static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 fn logger(message: &str) {
     if let Some(r) = RUNTIME.get() {
         let mut out = r.log.lock().unwrap_or_else(|e| e.into_inner());
-        // No full URLs, request bodies, response bodies, auth headers, or account IDs.
         let _ = writeln!(out, "[Cosmetics] {message}");
         let _ = out.flush();
+    }
+}
+fn debug_log(message: &str) {
+    if RUNTIME.get().is_some_and(|r|r.cfg.debug.verbose) {
+        logger(&format!("[DEBUG] {message}"));
+        // Visible in DebugView / Visual Studio, even without a game console.
+        let line=format!("[Cosmetics DEBUG] {message}");
+        let wide:Vec<u16>=line.encode_utf16().chain(Some(0)).collect();
+        unsafe { OutputDebugStringW(wide.as_ptr()); }
+    }
+}
+fn debug_json(request_id:u64, stage:&str, bytes:&[u8]) {
+    if RUNTIME.get().is_some_and(|r|r.cfg.debug.verbose && r.cfg.debug.response_shape) {
+        debug_log(&format!("request #{request_id}: {stage} {}",debug::json_summary(bytes)));
     }
 }
 
@@ -190,6 +204,8 @@ unsafe extern "system" fn worker(module: H) -> u32 {
         return 6;
     }
     logger("WinHTTP hooks installed; telemetry=request-route,response-header,overlay-decision,client-read");
+    logger(&format!("debug verbose={} response_shape={}; raw response bodies and credentials are never written",
+        RUNTIME.get().unwrap().cfg.debug.verbose,RUNTIME.get().unwrap().cfg.debug.response_shape));
     0
 }
 
@@ -362,6 +378,7 @@ unsafe fn catalog_fast_response(h:H)->bool {
     let shape=diagnostics::catalog_shape(&body);
     logger(&format!("request #{id}: catalog lookup={} body_bytes={} body_state={structure} body_shape={shape} overflow={overflow}",
         rule.name,body.len()));
+    debug_log(&format!("request #{id}: CATALOG_REQUEST_CAPTURED json_parse_state={structure} recognized_shape={shape} bytes={}",body.len()));
     if overflow {return false;}
     // CatalogItem should only replace a registered local ID. Unknown official
     // item requests stay on the official PlayFab response path.
@@ -377,10 +394,12 @@ unsafe fn catalog_fast_response(h:H)->bool {
                     catalog:true,zip:false,strip_encoding:false,status:200,delivery_logged:false});
             }
             logger(&format!("request #{id}: catalog local response applied ({})",rule.name));
+            debug_log(&format!("request #{id}: CATALOG_RESPONSE_REPLACED local_catalog_item=true"));
             true
         }
         Ok(None)=>{
             logger(&format!("request #{id}: catalog item not registered locally; passthrough"));
+            debug_log(&format!("request #{id}: CATALOG_RESPONSE_UNCHANGED original_server_response=true"));
             false
         }
         Ok(Some(_))=>{
@@ -416,6 +435,8 @@ unsafe extern "system" fn on_send(
     }
     if let Some((id,route,bytes,expected,overflow))=captured {
         logger(&format!("request #{id}: send {route}; captured_body_bytes={bytes}; declared_total_bytes={expected}; overflow={overflow}"));
+        debug_log(&format!("request #{id}: REQUEST_CAPTURED route={route} captured={bytes} total={expected} complete={} overflow={overflow}",
+            bytes==expected && !overflow));
     }
     let virtual_resource={
         let state=tables().lock().unwrap_or_else(|e|e.into_inner());
@@ -445,12 +466,24 @@ unsafe extern "system" fn on_send(
                     catalog:false,zip:true,strip_encoding:false,status,delivery_logged:false});
             }
         }
+        debug_log(&format!("virtual Persona ZIP response prepared status={status}; async={async_request}"));
         if async_request {notify_game(h,ctx,STATUS_SEND_COMPLETE,ptr::null_mut(),0);}
         return 1;
     }
     if let Some(r)=tables().lock().unwrap_or_else(|e|e.into_inner())
         .requests.get_mut(&state_key(h)){r.callback_context=ctx;}
-    original!(SEND, SendFn)(h,headers,header_len,optional,optional_len,total_len,ctx)
+    let sent=original!(SEND, SendFn)(h,headers,header_len,optional,optional_len,total_len,ctx);
+    let error=if sent==0 {GetLastError()}else{0};
+    let status=if sent!=0 {"accepted"} else if error==ERROR_IO_PENDING {"queued_async"} else {"failed"};
+    let request_id={
+        let state=tables().lock().unwrap_or_else(|e|e.into_inner());
+        state.requests.get(&state_key(h)).and_then(|r|r.diagnostic_route.as_ref().map(|route|(r.id,route.clone())))
+    };
+    if let Some((id,route))=request_id {
+        debug_log(&format!("request #{id}: SEND_RESULT route={route} status={status} win32_error={error}"));
+    }
+    if sent==0{SetLastError(error);}
+    sent
 }
 unsafe extern "system" fn on_write(h:H,data:*const c_void,len:u32,written:*mut u32)->B {
     // Synthetic Persona downloads are GET-only. No write is ever sent to DNS.
@@ -589,11 +622,20 @@ unsafe fn finish_async(h:H,completed:bool) {
         let Some(cap)=req.capture.take() else{return};
         // Keep the stable storage alive until WinHTTP has reported completion.
         // There must not be an outstanding read when this path is reached.
-        (req.host.clone(),req.path.clone(),req.method.clone(),req.request_body.clone(),
+        (req.id,req.host.clone(),req.path.clone(),req.method.clone(),req.request_body.clone(),
          req.callback_context,cap.bytes,cap.encoding)
     };
-    let (host,path,method,body,context,original,encoding)=taken;
+    let (id,host,path,method,body,context,original,encoding)=taken;
     let rule=runtime.cfg.match_rule(&host,&path,&method);
+    debug_log(&format!("request #{id}: RESPONSE_CAPTURED async=true complete={completed} bytes={} encoding={encoding:?} matched_rule={}",
+        original.len(),rule.as_ref().map_or("none",|r|r.name.as_str())));
+    if completed && runtime.cfg.debug.response_shape {
+        if let Ok(decoded)=codec::decode(&original,encoding,runtime.cfg.max_capture_bytes.clamp(1024,16*1024*1024)){
+            debug_json(id,"UPSTREAM_JSON", &decoded);
+        } else {
+            debug_log(&format!("request #{id}: UPSTREAM_JSON unavailable (decode failed)"));
+        }
+    }
     let mut replay=Replay{
         bytes:original,position:0,complete:completed,replaced:false,catalog:false,zip:false,
         strip_encoding:false,status:200,delivery_logged:false
@@ -611,9 +653,17 @@ unsafe fn finish_async(h:H,completed:bool) {
                     replay.strip_encoding=strip_encoding;
                     logger(&format!("route={}: action=replace_json async=true original_bytes={original_len} replacement_bytes={replacement_len} encoding_removed={strip_encoding}",
                         rule.name));
+                    debug_log(&format!("request #{id}: RESPONSE_REPLACED successfully bytes={replacement_len} route={}",rule.name));
+                    debug_json(id,"MODIFIED_JSON",&replay.bytes);
                 }
-                Ok(None)=>logger(&format!("route={}: action=passthrough reason=no_changes",rule.name)),
-                Err(e)=>logger(&format!("route={}: action=passthrough reason=overlay_error ({e})",rule.name)),
+                Ok(None)=>{
+                    logger(&format!("route={}: action=passthrough reason=no_changes",rule.name));
+                    debug_log(&format!("request #{id}: RESPONSE_UNCHANGED duplicate_or_empty"));
+                }
+                Err(e)=>{
+                    logger(&format!("route={}: action=passthrough reason=overlay_error ({e})",rule.name));
+                    debug_log(&format!("request #{id}: RESPONSE_REPLACE_FAILED; original bytes retained"));
+                },
             }
         }
     }
@@ -640,6 +690,7 @@ unsafe extern "system" fn status_bridge(h:H,context:usize,status:u32,info:H,len:
                 "identity"=>"identity",_=>"other/unknown"
             };
             logger(&format!("request #{id}: headers route={route} async={asynchronous} status={code:?} content_length={content_length:?} encoding={encoding_name}"));
+            debug_log(&format!("request #{id}: RESPONSE_HEADERS_CAPTURED route={route} http_status={code:?} raw_content_length={content_length:?} encoding={encoding_name}"));
         }
         if catalog_fast_response(h) {
             invoke_headers(h,context);
@@ -742,6 +793,18 @@ unsafe extern "system" fn on_receive(h:H,reserved:H)->B {
         if bytes==0 {completed=true;break;}
         raw.extend_from_slice(&temp[..bytes as usize]);
     }
+    let request_id={
+        let state=tables().lock().unwrap_or_else(|e|e.into_inner());
+        state.requests.get(&state_key(h)).map(|r|r.id).unwrap_or(0)
+    };
+    debug_log(&format!("request #{request_id}: RESPONSE_CAPTURED async=false complete={completed} bytes={} encoding={encoding:?}",raw.len()));
+    if completed && rt.cfg.debug.response_shape {
+        if let Ok(decoded)=codec::decode(&raw,encoding,limit) {
+            debug_json(request_id,"UPSTREAM_JSON",&decoded);
+        } else {
+            debug_log(&format!("request #{request_id}: UPSTREAM_JSON unavailable (decode failed)"));
+        }
+    }
     let mut replay=Replay {bytes:raw,position:0,complete:completed,replaced:false,
         catalog:false,zip:false,strip_encoding:false,status:200,delivery_logged:false};
     if completed && replay.bytes.len()<=limit {
@@ -753,6 +816,8 @@ unsafe extern "system" fn on_receive(h:H,reserved:H)->B {
                 replay.bytes=change.body;
                 replay.replaced=true;replay.strip_encoding=strip_encoding;
                 logger(&format!("route={}: action=replace_json async=false original_bytes={original_len} replacement_bytes={replacement_len} encoding_removed={strip_encoding}",rule.name));
+                debug_log(&format!("request #{request_id}: RESPONSE_REPLACED successfully bytes={replacement_len} route={}",rule.name));
+                debug_json(request_id,"MODIFIED_JSON",&replay.bytes);
             }
             Ok(None)=>logger(&format!("route={}: action=passthrough reason=no_changes",rule.name)),
             Err(e)=>logger(&format!("route={}: action=passthrough reason=overlay_error ({e})",rule.name)),
@@ -792,6 +857,7 @@ unsafe extern "system" fn on_read(h:H,buffer:H,cap:u32,out:*mut u32)->B {
         if !out.is_null() {*out=count;}
         if let Some((id,route,delivered))=completion {
             logger(&format!("request #{id}: route={route} action=client_read_complete delivered_bytes={delivered}"));
+            debug_log(&format!("request #{id}: CLIENT_CONSUMED_OVERLAY completely delivered_bytes={delivered}"));
         }
         if async_req {notify_game(h,ctx,STATUS_READ,buffer,count);}
         return 1;
@@ -876,6 +942,22 @@ unsafe extern "system" fn on_headers(
     original!(HEADERS,HeadersFn)(h,query,name,buffer,length,index)
 }
 unsafe extern "system" fn on_close(h:H)->B {
+    let close_debug={
+        let state=tables().lock().unwrap_or_else(|e|e.into_inner());
+        state.requests.get(&state_key(h)).and_then(|r| {
+            r.diagnostic_route.as_ref().map(|name|{
+                let (kind,bytes,read)=if let Some(rep)=r.replay.as_ref() {
+                    ("replay",rep.bytes.len(),rep.position)
+                }else if let Some(cap)=r.capture.as_ref(){
+                    ("async_capture",cap.bytes.len(),0)
+                }else {("passthrough",0,0)};
+                (r.id,name.clone(),kind,bytes,read)
+            })
+        })
+    };
+    if let Some((id,route,kind,bytes,read))=close_debug {
+        debug_log(&format!("request #{id}: HANDLE_CLOSE route={route} mode={kind} bytes={bytes} consumed_bytes={read}"));
+    }
     let keep_capture={
         let state=tables().lock().unwrap_or_else(|e|e.into_inner());
         state.requests.get(&state_key(h)).is_some_and(|r|r.capture.is_some())

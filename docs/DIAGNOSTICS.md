@@ -87,3 +87,29 @@ CI 通过表示 Rust 测试和 Windows DLL 编译成功，不代表游戏内异�
 - `persona_profile`: a Cosmos-style navigation tile into DressingRoom_Capes, only when the original StoreRow and dropdownId 0 are present. On unknown page structure, leaves the original response unchanged.
 
 If the packaged `cosmetics.json` was not updated, older local rules take precedence and the new profile overlay remains disabled. Replace config along with DLL for this test.
+
+## v0.1.4 开发调试日志
+
+默认配置：
+
+```json
+"debug": {"verbose": true, "response_shape": true}
+```
+
+安装更新后完全关闭并重新打开游戏，确认 `session_start build_version=0.1.4`。
+`logs/cosmetics.log` 为追加日志，每次启动以分隔符区分。
+也可用 DebugView 或 Visual Studio 调试输出查看 `[Cosmetics DEBUG]`。
+
+- `REQUEST_CAPTURED`：捕获请求体，标记捕获长度和完整性。
+- `SEND_RESULT`：WinHTTP 已接受、进入异步队列或发送失败。
+- `RESPONSE_HEADERS_CAPTURED`：得到响应状态码、长度与编码类型。
+- `RESPONSE_CAPTURED`：已读取响应体及完整/不完整状态。
+- `UPSTREAM_JSON`：原始数据的非敏感布局/列表数量摘要。
+- `RESPONSE_REPLACED`：在内存中生成了替换的响应字节。
+- `MODIFIED_JSON`：修改后 JSON 列表数量摘要，可与原版对比。
+- `CLIENT_CONSUMED_OVERLAY`：游戏 WinHTTP 消费者已读完替换字节。
+- `HANDLE_CLOSE`：关闭时记录缓存与消费字节数。
+
+只有 `route matched` 而没有 `RESPONSE_CAPTURED` 表示尚未证实收到完整响应体。
+有 `RESPONSE_REPLACED` 而没有 `CLIENT_CONSUMED_OVERLAY` 说明未观察到消费完毕。
+调试版本仍不记录 Authorization、XBL 凭据、原始账户库存、完整响应 JSON。
