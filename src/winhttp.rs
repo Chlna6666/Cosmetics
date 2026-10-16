@@ -358,6 +358,13 @@ unsafe extern "system" fn on_open_request(
                 logger(&format!("request #{id}: target callback bridge installation failed; original WinHTTP handler retained"));
             }
         }
+        if host_for_diagnostics.eq_ignore_ascii_case(persona::LOCAL_HOST) {
+            let asset_kind=if path_for_diagnostics.starts_with("/personabinary/") {"persona_zip"}
+                else if path_for_diagnostics.starts_with("/thumbnails/") {"thumbnail_png"}
+                else {"unknown_asset"};
+            logger(&format!("request #{id}: LOCAL_ASSET_REQUEST type={asset_kind} method={} async={async_session}",
+                diagnostics::redact_route_method(&method_for_diagnostics)));
+        }
         if let Some(name)=diagnostic_route {
             logger(&format!("request #{id}: route matched {name}; async={async_session}"));
         } else if is_commerce_host {
@@ -442,6 +449,8 @@ unsafe fn catalog_fast_response(h:H)->bool {
         (r.id,rule,r.request_body.clone(),r.body_overflow)
     };
     let (id,rule,body,overflow)=found;
+    let is_local=crate::response::catalog_id(&body).ok()
+        .and_then(|product|local_capes::catalog(&product)).is_some();
     let structure=crate::response::catalog_request_state(&body);
     let shape=diagnostics::catalog_shape(&body);
     logger(&format!("request #{id}: catalog lookup={} body_bytes={} body_state={structure} body_shape={shape} overflow={overflow}",
@@ -461,8 +470,12 @@ unsafe fn catalog_fast_response(h:H)->bool {
                 r.replay=Some(Replay{bytes,position:0,complete:true,replaced:true,
                     catalog:true,zip:false,png:false,strip_encoding:false,status:200,delivery_logged:false});
             }
-            logger(&format!("request #{id}: catalog local response applied ({})",rule.name));
-            debug_log(&format!("request #{id}: CATALOG_RESPONSE_REPLACED local_catalog_item=true"));
+            logger(&format!("request #{id}: CATALOG_RESPONSE_READY source={} route={} bytes={}",
+                if is_local {"local_zip"}else{"legacy_or_cosmos"},rule.name,
+                tables().lock().unwrap_or_else(|e|e.into_inner()).requests.get(&state_key(h))
+                    .and_then(|r|r.replay.as_ref()).map_or(0,|r|r.bytes.len())));
+            debug_log(&format!("request #{id}: CATALOG_RESPONSE_REPLACED source={} (not an equip success)",
+                if is_local {"local_zip"}else{"legacy_or_cosmos"}));
             true
         }
         Ok(None)=>{
@@ -525,7 +538,7 @@ unsafe extern "system" fn on_send(
             (Vec::new(),405)
         } else if let Some((bytes,kind))=local_capes::asset(&path) {
             image=kind==local_capes::AssetType::Png;
-            logger(&format!("local cape virtual resource delivered kind={kind:?} bytes={}",bytes.len()));
+            logger(&format!("local cape virtual resource found kind={kind:?} bytes={} source=memory",bytes.len()));
             (bytes.to_vec(),200)
         } else {
             let loaded=RUNTIME.get().map(|runtime|persona::load(&runtime.root,&path));
@@ -546,7 +559,9 @@ unsafe extern "system" fn on_send(
                     catalog:false,zip:!image,png:image,strip_encoding:false,status,delivery_logged:false});
             }
         }
-        debug_log(&format!("virtual Persona ZIP response prepared status={status}; async={async_request}"));
+        logger(&format!("LOCAL_ASSET_RESPONSE_READY status={status} bytes={} async={async_request} (game acceptance unverified)",
+            tables().lock().unwrap_or_else(|e|e.into_inner()).requests.get(&state_key(h))
+                .and_then(|r|r.replay.as_ref()).map_or(0,|r|r.bytes.len())));
         if async_request {notify_game(h,ctx,STATUS_SEND_COMPLETE,ptr::null_mut(),0);}
         return 1;
     }

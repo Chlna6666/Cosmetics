@@ -3,6 +3,7 @@
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use image::{imageops, ImageFormat, Rgba, RgbaImage};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{Cursor, Read, Write};
@@ -62,14 +63,32 @@ pub fn asset(path:&str)->Option<(&'static [u8],AssetType)> {
     let a=REGISTRY.get()?.assets.get(path)?;
     Some((a.data.as_slice(),a.kind))
 }
-fn validate_png(bytes:&[u8])->Result<(u32,u32),String>{
-    if bytes.len()<33||&bytes[..8]!=b"\x89PNG\r\n\x1a\n"||&bytes[12..16]!=b"IHDR"{
-        return Err("cape.png is not a PNG".into());
-    }
-    let w=u32::from_be_bytes(bytes[16..20].try_into().unwrap());
-    let h=u32::from_be_bytes(bytes[20..24].try_into().unwrap());
+fn validate_png(bytes:&[u8])->Result<RgbaImage,String>{
+    // Reject truncated PNGs rather than accepting only an IHDR header.
+    // A malformed cape cannot be treated as loadable after ZIP validation.
+    let reader=image::load_from_memory_with_format(bytes,ImageFormat::Png)
+        .map_err(|e|format!("PNG decode failed: {e}"))?;
+    let (w,h)=(reader.width(),reader.height());
     if w==0||h==0||w>2048||h>2048{return Err("invalid PNG dimensions".into());}
-    Ok((w,h))
+    Ok(reader.into_rgba8())
+}
+fn make_thumbnail(image:&RgbaImage)->Result<Vec<u8>,String>{
+    let (w,h)=image.dimensions();
+    // The Minecraft cape texture is a UV sheet, not a square marketplace
+    // thumbnail. For 64x32 textures the visible back is x=12..22,y=1..17.
+    let face=if w%64==0 && h%32==0 && w/64==h/32 {
+        let scale=w/64;
+        imageops::crop_imm(image,12*scale,scale,10*scale,16*scale).to_image()
+    }else{
+        image.clone()
+    };
+    let resized=imageops::resize(&face,40,56,imageops::FilterType::Nearest);
+    let mut canvas=RgbaImage::from_pixel(64,64,Rgba([40,43,48,255]));
+    imageops::overlay(&mut canvas,&resized,12,4);
+    let mut out=std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(canvas).write_to(&mut out,ImageFormat::Png)
+        .map_err(|e|format!("thumbnail encode failed: {e}"))?;
+    Ok(out.into_inner())
 }
 fn uuid_from(seed:&[u8],kind:&str)->String {
     let mut sha=Sha256::new();
@@ -83,30 +102,54 @@ fn uuid_from(seed:&[u8],kind:&str)->String {
         raw[0],raw[1],raw[2],raw[3],raw[4],raw[5],raw[6],raw[7],raw[8],raw[9],raw[10],raw[11],raw[12],raw[13],raw[14],raw[15])
 }
 fn valid_uuid(id:&str)->bool{crate::persona::is_uuid(id)}
-fn validate_native(bytes:&[u8])->Result<(),String>{
-    let mut zip=ZipArchive::new(Cursor::new(bytes)).map_err(|e|format!("native persona.zip invalid: {e}"))?;
+#[derive(Clone,Debug,PartialEq,Eq)]
+struct NativeIdentity {uuid:String,version:String}
+fn validate_native(bytes:&[u8])->Result<NativeIdentity,String>{
+    let mut zip=ZipArchive::new(Cursor::new(bytes))
+        .map_err(|e|format!("native persona.zip invalid: {e}"))?;
     if zip.len()>1024{return Err("native persona.zip has too many members".into());}
     let mut raw=Vec::new();
     {
-        let mut f=zip.by_name("manifest.json").map_err(|e|format!("persona manifest missing: {e}"))?;
-        if f.size()>MAX_MANIFEST as u64{return Err("persona manifest too large".into());}
-        f.by_ref().take(MAX_MANIFEST as u64+1).read_to_end(&mut raw).map_err(|e|e.to_string())?;
+        let mut file=zip.by_name("manifest.json").map_err(|e|format!("persona manifest missing: {e}"))?;
+        if file.size()>MAX_MANIFEST as u64{return Err("persona manifest too large".into());}
+        file.by_ref().take(MAX_MANIFEST as u64+1).read_to_end(&mut raw).map_err(|e|e.to_string())?;
     }
-    let manifest:Value=serde_json::from_slice(&raw).map_err(|e|format!("persona manifest JSON invalid: {e}"))?;
-    if !manifest.get("modules").and_then(Value::as_array).is_some_and(|modules|
-        modules.iter().any(|m|m.get("type").and_then(Value::as_str)==Some("persona_piece"))){
-        return Err("persona.zip must contain a persona_piece module".into());
+    let manifest:Value=serde_json::from_slice(&raw)
+        .map_err(|e|format!("persona manifest JSON invalid: {e}"))?;
+    let module=manifest.get("modules").and_then(Value::as_array)
+        .and_then(|arr|arr.iter().find(|m|
+            m.get("type").and_then(Value::as_str)==Some("persona_piece")))
+        .ok_or("persona.zip must contain a persona_piece module")?;
+    // The persona packIdentity refers to header.uuid, NOT the module UUID.
+    // Native Bedrock Persona cache examples have distinct header/module UUIDs.
+    if !module.get("uuid").and_then(Value::as_str).is_some_and(valid_uuid) {
+        return Err("persona_piece module must have a valid uuid".into());
     }
-    Ok(())
+    let header=manifest.get("header").ok_or("native manifest missing header")?;
+    let uuid=header.get("uuid").and_then(Value::as_str)
+        .filter(|id|valid_uuid(id))
+        .ok_or("native persona header.uuid must be a UUID")?
+        .to_ascii_lowercase();
+    let version=match header.get("version") {
+        Some(Value::Array(parts)) if parts.len()==3 => {
+            let parts:Option<Vec<u64>>=parts.iter().map(Value::as_u64).collect();
+            let parts=parts.ok_or("native module version must contain numbers")?;
+            format!("{}.{}.{}",parts[0],parts[1],parts[2])
+        }
+        Some(Value::String(s)) if !s.is_empty() && s.bytes().all(|c|c.is_ascii_digit()||c==b'.')
+            =>s.clone(),
+        _=>return Err("persona_piece module version is missing or invalid".into()),
+    };
+    Ok(NativeIdentity{uuid,version})
 }
-fn experimental_persona_png(name:&str,id:&str,resource_id:&str,png:&[u8])->Result<Vec<u8>,String>{
+fn experimental_persona_png(name:&str,pack_uuid:&str,module_uuid:&str,png:&[u8])->Result<Vec<u8>,String>{
     // This is a plaintext, *experimental* Persona resource payload, not a
     // verified Minecraft Marketplace personabinary file or signed package.
     let manifest=json!({
         "format_version":2,
         "header":{"name":name,"description":"Cosmetics local plaintext cape experiment",
-                  "uuid":id,"version":[1,0,0],"min_engine_version":[1,16,0]},
-        "modules":[{"type":"persona_piece","uuid":resource_id,"version":[1,0,0]}]
+                  "uuid":pack_uuid,"version":[1,0,0],"min_engine_version":[1,16,0]},
+        "modules":[{"type":"persona_piece","uuid":module_uuid,"version":[1,0,0]}]
     });
     let files=json!({"content":[{"path":"manifest.json"},{"path":"textures/cape.png"},{"path":"contents.json"}]});
     let mut writer=ZipWriter::new(Cursor::new(Vec::new()));
@@ -194,14 +237,15 @@ impl Registry {
             None=>uuid_from(seed.as_bytes(),"item")
         };
         let resource_id=uuid_from(id.as_bytes(),"resource");
+        let generated_pack_uuid=uuid_from(id.as_bytes(),"pack");
         if !reserved.insert(id.clone()){return Err("duplicate local cape ID".into());}
         let png=match zip.by_name("cape.png"){
             Ok(mut file)=>{
                 if file.size()>MAX_IMAGE as u64{return Err("cape.png exceeds 8MiB".into());}
                 let mut data=Vec::new();
                 file.by_ref().take(MAX_IMAGE as u64+1).read_to_end(&mut data).map_err(|e|e.to_string())?;
-                validate_png(&data)?;
-                Some(data)
+                let img=validate_png(&data)?;
+                Some((data,img))
             }
             Err(zip::result::ZipError::FileNotFound)=>None,
             Err(e)=>return Err(e.to_string()),
@@ -211,22 +255,24 @@ impl Registry {
                 if file.size()>MAX_NATIVE as u64{return Err("persona.zip exceeds 64MiB".into());}
                 let mut data=Vec::new();
                 file.by_ref().take(MAX_NATIVE as u64+1).read_to_end(&mut data).map_err(|e|e.to_string())?;
-                validate_native(&data)?;
-                Some(data)
+                let native=validate_native(&data)?;
+                Some((data,native))
             }
             Err(zip::result::ZipError::FileNotFound)=>None,
             Err(e)=>return Err(e.to_string()),
         };
         if png.is_none()&&original.is_none(){return Err("pack requires cape.png or persona.zip".into());}
         let is_native=original.is_some();
+        let identity=original.as_ref().map(|(_,identity)|identity.clone())
+            .unwrap_or(NativeIdentity{uuid:generated_pack_uuid.clone(),version:"1.0.0".to_string()});
         let persona=match original{
-            Some(payload)=>payload,
-            None=>experimental_persona_png(&name,&id,&resource_id,png.as_ref().unwrap())?
+            Some((payload,_))=>payload,
+            None=>experimental_persona_png(&name,&generated_pack_uuid,&resource_id,&png.as_ref().unwrap().0)?
         };
-        let thumb=png.map(|image| {
+        let thumb=png.map(|(_png,img)| {
             let path=format!("/thumbnails/{resource_id}.png");
-            (path,image)
-        });
+            make_thumbnail(&img).map(|bytes|(path,bytes))
+        }).transpose()?;
         let required=persona.len()+thumb.as_ref().map_or(0,|(_,bytes)|bytes.len());
         if required>MAX_TOTAL_BYTES.saturating_sub(*total){
             return Err("total in-memory local cape budget exceeded".into());
@@ -243,10 +289,13 @@ impl Registry {
             "creatorName":author,
             "pieceType":"persona_capes",
             "ownership":"Purchased",
+            "price":{"listPrice":0,"realmsInfo":{"inRealmsPlus":false},
+                "currencyId":"ecd19d3c-7635-402c-a185-eb11cb6c6946",
+                "virtualCurrencyType":"Minecoin"},
             "rarity":"common",
             "packType":"Persona",
             "thumbnail":{"tag":"Thumbnail","type":"Thumbnail","url":thumbnail,"urlWithResolution":thumbnail},
-            "packIdentity":[{"type":"persona_piece","uuid":resource_id,"version":"1.0.0"}]
+            "packIdentity":[{"type":"persona_piece","uuid":identity.uuid,"version":identity.version}]
         });
         let catalog=json!({
             "code":200,"status":"OK",
@@ -254,10 +303,12 @@ impl Registry {
                 "Id":id,
                 "Contents":[{"Id":resource_id,"Type":"personabinary","Url":url,
                     "MinClientVersion":"1.16.0","MaxClientVersion":"65535.65535.65535"}],
-                "DisplayProperties":{"creatorName":author,"purchasable":false,
-                    "packIdentity":[{"type":"persona_piece","uuid":resource_id,"version":"1.0.0"}]}
+                "DisplayProperties":{"creatorName":author,"purchasable":true,
+                    "packIdentity":[{"type":"persona_piece","uuid":identity.uuid,"version":identity.version}]}
             }}
         });
+        // Product and native module identities must agree. This is not
+        // proof the game will accept a synthetic unsigned Persona package.
         // Commit all outputs together only after complete validation.
         let catalog_bytes=serde_json::to_vec(&catalog).map_err(|e|e.to_string())?;
         reg.catalogs.insert(id,catalog_bytes);
@@ -274,15 +325,14 @@ impl Registry {
 mod tests{
     use super::*;
     fn dummy_png()->Vec<u8>{
-        // Minimal header-only image: sufficient for route tests, not a renderable PNG.
-        let mut p=b"\x89PNG\r\n\x1a\n".to_vec();
-        p.extend_from_slice(&13u32.to_be_bytes());
-        p.extend_from_slice(b"IHDR");
-        p.extend_from_slice(&64u32.to_be_bytes());
-        p.extend_from_slice(&32u32.to_be_bytes());
-        p.extend_from_slice(&[8,6,0,0,0,0,0,0,0,0,0]);
-        p
+        let mut img=RgbaImage::from_pixel(64,32,Rgba([0,0,0,0]));
+        // UV back face should be visible in preview, not flattened gibberish.
+        for y in 1..17 {for x in 12..22 { img.put_pixel(x,y,Rgba([220,30,30,255])); }}
+        let mut out=Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img).write_to(&mut out,ImageFormat::Png).unwrap();
+        out.into_inner()
     }
+
     fn pack_zip(root:&Path,name:&str,manifest:Option<&str>) {
         fs::create_dir_all(root.join("capes")).unwrap();
         let file=File::create(root.join("capes").join(name)).unwrap();
@@ -312,10 +362,47 @@ mod tests{
         let path=catalog["data"]["Item"]["Contents"][0]["Url"].as_str().unwrap()
             .strip_prefix("https://cosmetics.invalid").unwrap();
         assert_eq!(reg.assets.get(path).unwrap().kind,AssetType::PersonaZip);
+        let img=reg.assets.values().find(|a|a.kind==AssetType::Png).unwrap();
+        let preview=validate_png(&img.data).unwrap();
+        assert_eq!(preview.dimensions(),(64,64));
+        assert_eq!(preview.get_pixel(32,32),&Rgba([220,30,30,255]));
         let native=&reg.assets.get(path).unwrap().data;
         let mut zip=ZipArchive::new(Cursor::new(native)).unwrap();
         assert!(zip.by_name("textures/cape.png").is_ok());
+        let manifest:Value=serde_json::from_reader(zip.by_name("manifest.json").unwrap()).unwrap();
+        assert_eq!(manifest["header"]["uuid"],reg.items[0]["packIdentity"][0]["uuid"]);
+        assert_ne!(manifest["modules"][0]["uuid"],manifest["header"]["uuid"]);
         let _=fs::remove_dir_all(&root);
+    }
+    #[test] fn original_native_module_identity_is_used_in_catalog_and_wardrobe() {
+        let root=std::env::temp_dir().join(format!("cosmetics_native_{}",std::process::id()));
+        let _=fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("capes")).unwrap();
+        let uuid="a6c559a1-22b3-44c5-88d6-6ff777888999";
+        let module_uuid="12345678-22b3-44c5-88d6-6ff777888999";
+        let mut native_zip=ZipWriter::new(Cursor::new(Vec::new()));
+        native_zip.start_file("manifest.json",SimpleFileOptions::default()).unwrap();
+        native_zip.write_all(format!(
+            r#"{{"format_version":1,"header":{{"uuid":"{uuid}","version":[2,3,4]}},"modules":[{{"type":"persona_piece","uuid":"{module_uuid}","version":[9,9,9]}}]}}"#
+        ).as_bytes()).unwrap();
+        let native=native_zip.finish().unwrap().into_inner();
+        let mut outer=ZipWriter::new(File::create(root.join("capes/native.zip")).unwrap());
+        outer.start_file("persona.zip",SimpleFileOptions::default()).unwrap();
+        outer.write_all(&native).unwrap();
+        outer.finish().unwrap();
+        let reg=Registry::scan(&root);
+        assert_eq!(reg.accepted,1,"{:?}",reg.diagnostics);
+        assert_eq!(reg.native_payloads,1);
+        assert_eq!(reg.items[0]["packIdentity"][0]["uuid"],uuid);
+        assert_eq!(reg.items[0]["packIdentity"][0]["version"],"2.3.4");
+        let id=reg.items[0]["id"].as_str().unwrap();
+        let product:Value=serde_json::from_slice(reg.catalogs.get(id).unwrap()).unwrap();
+        assert_eq!(product["data"]["Item"]["DisplayProperties"]["packIdentity"][0]["uuid"],uuid);
+        assert_eq!(product["data"]["Item"]["DisplayProperties"]["packIdentity"][0]["version"],"2.3.4");
+        let _=fs::remove_dir_all(&root);
+    }
+    #[test] fn malformed_png_is_rejected_instead_of_registering_a_false_positive() {
+        assert!(validate_png(b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR").is_err());
     }
     #[test] fn unnamed_cape_uses_zip_filename_and_stable_ids() {
         let root=std::env::temp_dir().join(format!("cosmetics_unnamed_{}",std::process::id()));

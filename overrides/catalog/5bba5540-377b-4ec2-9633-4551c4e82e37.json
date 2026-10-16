@@ -15,14 +15,15 @@
       ],
       "DisplayProperties": {
         "creatorName": "BionicBen",
-        "purchasable": false,
+        "purchasable": true,
         "packIdentity": [
           {
             "type": "persona_piece",
             "uuid": "4a48472c-2256-41db-9b96-790276e84fc1",
             "version": "1.0.0"
           }
-        ]
+        ],
+        "originalCreatorId": "9926cc22-2eb0-4bd4-a39d-76c8082a1c58"
       }
     }
   }

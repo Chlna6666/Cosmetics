@@ -165,3 +165,16 @@ If the packaged `cosmetics.json` was not updated, older local rules take precede
 如果仍然只看到 `Catalog/Search` 而没有 `DressingRoom_Capes`，
 这是游戏没有调用目标页面，并不表示 ZIP 校验失败。
 本地 ZIP 已注册 ≠ 游戏更衣室已接收 ≠ Persona 装备成功。
+
+
+## v0.1.10 装备链路诊断
+
+`LOCAL_ASSET_REQUEST type=persona_zip`：游戏通过 WinHTTP 请求本地资源 URL。
+`LOCAL_ASSET_RESPONSE_READY status=200`：Cosmetics 已准备对应的 ZIP 字节。
+`CATALOG_RESPONSE_READY source=local_zip`：本地商品元数据匹配并准备替换。
+`source=legacy_or_cosmos`：是旧目录商品或内置 Cosmos 映射。
+以上均不能当作真正 `equipped=true`。
+
+如点击后没有 `CATALOG_RESPONSE_READY` 或 `LOCAL_ASSET_REQUEST`，
+请保留从点击到失败后的完整日志，后续需要查找非 WinHTTP Persona
+装备过程及相关状态，不应伪造 server inventory 的 200/Owned 响应。

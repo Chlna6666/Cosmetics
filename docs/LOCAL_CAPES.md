@@ -124,3 +124,20 @@ v0.1.8 会记录：
 以上仅表示本地资源在内存中注册成功，并不表示游戏市场/更衣室接受它。
 如果市场返回 401，先用根节点 `enabled=false` 禁用全部 Hook 做 A/B
 再继续验证本地披风，避免将鉴权失败归因于图片解析。
+
+
+## v0.1.10 本地 PNG 预览及原生资源 UUID
+
+- `cape.png` 必须是能实际解码的 PNG，旧版只检查 PNG 头导致误报。
+- 支持 64×32、128×64 等成比例 UV 图，将披风背面裁切绘制成 64×64 的商品缩略图。
+- 原生 `persona.zip` 采用 `manifest.header.uuid` 与 `header.version` 作为商品 packIdentity；
+  `modules[].uuid` 是另一种身份，不能替换 header.uuid。
+- 由 PNG 生成的实验性 Persona ZIP 现在也保持 header UUID 与 packIdentity 一致。
+
+真正 Bedrock Persona 缓存并不只是明文资源包：可见二进制 `contents.json`、
+`signatures.json`，并可能执行额外校验。**当前 PNG-only 格式仍是实验性质，
+不能保证游戏内穿戴，更不保证多人可见。**
+
+点击披风后请关注 `CATALOG_RESPONSE_READY`、`LOCAL_ASSET_REQUEST` 与
+`LOCAL_ASSET_RESPONSE_READY`，以及对应的客户端读取完成事件。
+如果连资源请求都没有，不能把失败归因于 ZIP 内部解密，而应继续追踪商品和装备逻辑。

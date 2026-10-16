@@ -88,3 +88,14 @@ entry grants server-side ownership.
 - [ ] Validate PlayFab 401 A/B with Cosmetics hooks completely disabled
 - [ ] Verify target async callback inheritance and status event ordering in Minecraft 26.40
 - [ ] Verify native Persona equip while original marketplace is healthy
+
+
+## v0.1.10 Persona equipability
+- [x] Decode local PNGs and generate proper cropped cape-thumbnail PNGs
+- [x] Read native manifest.header.uuid and header.version for packIdentity
+- [x] Keep generated packIdentity consistent with plaintext manifest header
+- [x] Use upstream Cosmos public item price/catalog metadata fields
+- [x] Distinguish local vs legacy catalog responses and virtual asset requests in logs
+- [ ] Validate actual asset download/read sequence on Bedrock 26.40
+- [ ] Reverse-map legitimate Persona binary contents/signature validation (no entitlement forgery)
+- [ ] Implement a game-supported custom cape registration/equip workflow not reliant on unsigned Persona impersonation

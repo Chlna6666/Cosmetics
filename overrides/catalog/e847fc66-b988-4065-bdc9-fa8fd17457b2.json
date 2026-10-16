@@ -15,14 +15,15 @@
       ],
       "DisplayProperties": {
         "creatorName": "Minecraft",
-        "purchasable": false,
+        "purchasable": true,
         "packIdentity": [
           {
             "type": "persona_piece",
             "uuid": "b4d53038-09d6-42b7-88a3-22b29b893b88",
             "version": "1.0.0"
           }
-        ]
+        ],
+        "originalCreatorId": "9926cc22-2eb0-4bd4-a39d-76c8082a1c58"
       }
     }
   }

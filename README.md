@@ -1,6 +1,6 @@
 # Cosmetics
 
-Version: **0.1.9**. Two Cosmos CDN-backed cape metadata presets are included,
+Version: **0.1.10**. Two Cosmos CDN-backed cape metadata presets are included,
 with **NotOwned** ownership. Their actual Persona ZIPs are **not embedded**
 or republished. The older manifest-only diagnostic ZIP is still available as
 an opt-in protocol probe.
@@ -385,3 +385,42 @@ IMPORTANT: even in local-only mode, the local cape *appearance in Minecraft*
 still depends on the game requesting the `DressingRoom_Capes` page and
 successfully parsing the returned response; no native wardrobe-internal
 injection has been implemented.
+
+## v0.1.10 — Cape thumbnails and Persona identity consistency
+
+The previous PNG-only pipeline reused the full 64x32 cape UV sheet as the store
+thumbnail. It now actually decodes PNG images, validates decoded content, and
+creates a 64x64 thumbnail from the visible cape back (12,1 to 22,17 in a
+64x32 UV texture). Optional native `persona.zip` remains unchanged.
+
+Persona `packIdentity.uuid` must refer to the pack **manifest header.uuid**,
+not the separate `modules[].uuid`. Native packs use the header UUID and
+version from their own manifest. PNG-generated test ZIPs now use a deterministic
+header UUID consistently in both their manifest and catalog records.
+
+Local items now carry the same zero-price data fields used in the Cosmos
+wardrobe catalog. Bundled legacy Cosmos catalog records also use the public
+`purchasable` and `originalCreatorId` fields from their upstream metadata,
+without claiming ownership.
+
+New traces: `LOCAL_ASSET_REQUEST`, `LOCAL_ASSET_RESPONSE_READY`,
+`CATALOG_RESPONSE_READY source=local_zip|legacy_or_cosmos`. On clicking a cape,
+collect the log starting at the click through its failure. These traces
+can tell whether the game fetched the catalog entry, tried to download the
+Persona package, and consumed its bytes. They **cannot** prove equip success
+because equipping may be performed inside Minecraft without a WinHTTP request.
+
+### Important protocol limitation
+
+Actual Persona cache packages observed in Bedrock 26.40 contain distinct
+manifest header/module UUIDs, a binary `contents.json` and signature metadata.
+The PNG-only builder currently produces a plaintext **experimental** ZIP, not
+a verified, signed game-native Persona package. It can be displayed in the
+wardrobe but may fail to load, preview, or equip. The two bundled Cosmos
+items remain `NotOwned` storefront examples pointing to third-party CDN ZIPs;
+they are not authenticated account inventory and are not expected to equip
+without the game's own acceptance/entitlement path. No Xbox inventory or
+Microsoft entitlement state has been altered.
+
+Use `cosmetics.local-only.json` from the build to isolate custom ZIPs from
+the two Cosmos metadata examples and existing imported override files.
