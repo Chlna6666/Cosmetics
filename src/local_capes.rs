@@ -114,7 +114,8 @@ struct NativeIdentity {uuid:String,version:String}
 fn is_binary_bundle(bytes:&[u8])->Result<bool,String>{
     let zip=ZipArchive::new(Cursor::new(bytes))
         .map_err(|e|format!("persona ZIP invalid: {e}"))?;
-    Ok(zip.file_names().flatten().any(|name|name=="ppack0.zip"))
+    let bundled=zip.file_names().flatten().any(|name|name=="ppack0.zip");
+    Ok(bundled)
 }
 fn validate_native(bytes:&[u8])->Result<NativeIdentity,String>{
     // Native Persona data can be a direct pack or a catalog personabinary
