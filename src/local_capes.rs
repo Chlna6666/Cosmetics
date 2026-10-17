@@ -81,6 +81,29 @@ fn validate_png(bytes:&[u8])->Result<RgbaImage,String>{
     if w==0||h==0||w>2048||h>2048{return Err("invalid PNG dimensions".into());}
     Ok(reader.into_rgba8())
 }
+/// Normalize the Persona payload texture to 8-bit RGBA, without resizing.
+/// The PNG decoder supports indexed/palette (color type 3) images, but
+/// Bedrock's Persona texture path has not been proven to support palette PNGs.
+/// The thumbnail already uses decoded RGBA; the Persona texture must match.
+/// Preserve existing RGBA8 bytes exactly to avoid needless cache churn.
+fn persona_rgba_png(original:&[u8],decoded:&RgbaImage)->Result<(Vec<u8>,bool),String>{
+    if original.len()>26 && original[24]==8 && original[25]==6 {
+        return Ok((original.to_vec(),false));
+    }
+    let mut out=Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(decoded.clone())
+        .write_to(&mut out,ImageFormat::Png)
+        .map_err(|e|format!("Persona RGBA PNG encode failed: {e}"))?;
+    if out.get_ref().len()>MAX_IMAGE {
+        return Err("normalized Persona PNG exceeds 8 MiB".into());
+    }
+    Ok((out.into_inner(),true))
+}
+fn fill_thumb_rect(canvas:&mut RgbaImage,x0:u32,y0:u32,x1:u32,y1:u32,color:Rgba<u8>){
+    for y in y0..y1 {
+        for x in x0..x1{canvas.put_pixel(x,y,color);}
+    }
+}
 fn make_thumbnail(image:&RgbaImage)->Result<Vec<u8>,String>{
     let (w,h)=image.dimensions();
     // The Minecraft cape texture is a UV sheet, not a square marketplace
@@ -91,9 +114,24 @@ fn make_thumbnail(image:&RgbaImage)->Result<Vec<u8>,String>{
     }else{
         image.clone()
     };
-    let resized=imageops::resize(&face,40,56,imageops::FilterType::Nearest);
+    // Preview the cape on the *back* of a neutral mannequin, not a flat
+    // texture tile. The cape's visible outer back is UV x=12..22 on the
+    // standard 64x32 atlas (Minecraft cape cube origin UV [0,0]).
+    let resized=imageops::resize(&face,34,43,imageops::FilterType::Nearest);
     let mut canvas=RgbaImage::from_pixel(64,64,Rgba([40,43,48,255]));
-    imageops::overlay(&mut canvas,&resized,12,4);
+    // Mannequin: neck/head, shoulders, arms and feet remain visible behind
+    // the cape. Do not embed copyrighted game textures or a fake 'front'.
+    fill_thumb_rect(&mut canvas,25,2,39,17,Rgba([129,137,145,255]));
+    fill_thumb_rect(&mut canvas,25,2,39,5,Rgba([157,164,171,255]));
+    fill_thumb_rect(&mut canvas,10,17,54,37,Rgba([93,104,113,255]));
+    fill_thumb_rect(&mut canvas,7,23,15,46,Rgba([119,127,134,255]));
+    fill_thumb_rect(&mut canvas,49,23,57,46,Rgba([119,127,134,255]));
+    fill_thumb_rect(&mut canvas,19,54,29,62,Rgba([80,88,96,255]));
+    fill_thumb_rect(&mut canvas,35,54,45,62,Rgba([80,88,96,255]));
+    // Small directional shadow and trim suggest depth, while cape front
+    // pattern remains completely determined by the actual outer-back UV.
+    fill_thumb_rect(&mut canvas,13,18,50,61,Rgba([29,32,38,255]));
+    imageops::overlay(&mut canvas,&resized,15,17);
     let mut out=std::io::Cursor::new(Vec::new());
     image::DynamicImage::ImageRgba8(canvas).write_to(&mut out,ImageFormat::Png)
         .map_err(|e|format!("thumbnail encode failed: {e}"))?;
@@ -236,6 +274,8 @@ struct PreparedCape {
     assets:Vec<(String,LocalAsset)>,
     native:bool,
     dimensions:Option<(u32,u32)>,
+    png_color_type:Option<u8>,
+    persona_rgba_normalized:bool,
 }
 fn version_parts(version:&str)->Result<[u32;3],String>{
     let parts:Vec<_>=version.split('.').collect();
@@ -365,8 +405,10 @@ impl Registry {
                         let size=entry.dimensions.map_or("none".to_string(),|(w,h)|
                             format!("{w}x{h} scale={}x",w/64));
                         reg.diagnostics.push(format!(
-                            "CAPE_REGISTERED {label} index={} texture={} payload={} game_accepted=UNVERIFIED{}",
-                            index+1,size,if entry.native{"native_persona"}else{"generated_persona_cfb8"},
+                            "CAPE_REGISTERED {label} index={} texture={} source_png_color_type={} persona_rgba_normalized={} payload={} game_accepted=UNVERIFIED{}",
+                            index+1,size,entry.png_color_type.map_or("none".to_string(),|x|x.to_string()),
+                            entry.persona_rgba_normalized,
+                            if entry.native{"native_persona"}else{"generated_persona_cfb8"},
                             if entry.native {""} else {" metadata_generated=true game_acceptance_unverified=true"}));
                         item_ids.insert(entry.id.clone());
                         reg.catalogs.insert(entry.id,entry.catalog);
@@ -530,14 +572,20 @@ impl Registry {
                 uuid:generated_pack_uuid.clone(),
                 version:generated_version.map(version_string).unwrap_or_else(||version_text.to_owned())
             });
+        let png_color_type=png.as_deref().and_then(|p|p.get(25)).copied();
+        let mut converted_rgba=false;
         let persona=match original {
-            // Keep authentic catalog bundles unchanged; wrap bare Persona
-            // packs in the Cosmos-compatible ppack0.zip envelope.
+            // Keep native Persona bytes intact; PNG is only a preview here.
             Some(data)=>if is_binary_bundle(&data)?{data}
                 else{crate::persona_pack::bundle_pack(&data)?},
-            None=>experimental_persona_png(&name,&generated_pack_uuid,
-                &module_uuid,&png.ok_or("missing cape PNG")?,
-                generated_version.unwrap_or(version))?
+            None=>{
+                let source=png.as_deref().ok_or("missing cape PNG")?;
+                let decoded=decoded.as_ref().ok_or("missing decoded cape PNG")?;
+                let (texture,converted)=persona_rgba_png(source,decoded)?;
+                converted_rgba=converted;
+                experimental_persona_png(&name,&generated_pack_uuid,
+                    &module_uuid,&texture,generated_version.unwrap_or(version))?
+            }
         };
         // Key download URLs to generated bytes, in addition to the pack
         // content-version change, to invalidate both HTTP and installed-pack
@@ -595,7 +643,8 @@ impl Registry {
             assets.push((thumbnail_path,LocalAsset{data:bytes,kind:AssetType::Png}));
         }
         Ok(PreparedCape{id:item_id,item,catalog:serde_json::to_vec(&catalog)
-            .map_err(|e|e.to_string())?,assets,native,dimensions})
+            .map_err(|e|e.to_string())?,assets,native,dimensions,
+            png_color_type,persona_rgba_normalized:converted_rgba})
     }
 }
 
@@ -629,6 +678,88 @@ mod tests{
             zip.write_all(manifest.as_bytes()).unwrap();
         }
         zip.finish().unwrap();
+    }
+    // Build a valid indexed PNG (color type 3) without new dependencies.
+    // This exercises the exact failure category in the 1280x640 user ZIP.
+    fn png_chunk(out:&mut Vec<u8>,kind:&[u8;4],data:&[u8]){
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        out.extend_from_slice(kind);
+        out.extend_from_slice(data);
+        let mut crc=0xffff_ffffu32;
+        for &byte in kind.iter().chain(data.iter()){
+            crc^=byte as u32;
+            for _ in 0..8{
+                crc=(crc>>1)^(if crc&1==1{0xedb8_8320}else{0});
+            }
+        }
+        out.extend_from_slice(&(!crc).to_be_bytes());
+    }
+    fn palette_cape_png(scale:u32)->Vec<u8>{
+        use flate2::{write::ZlibEncoder,Compression};
+        let (w,h)=(64*scale,32*scale);
+        let mut rows=Vec::with_capacity(((w+1)*h) as usize);
+        for y in 0..h {
+            rows.push(0); // no PNG row filter
+            for x in 0..w{
+                rows.push(u8::from(x>=12*scale && x<22*scale
+                    && y>=scale && y<17*scale));
+            }
+        }
+        let mut z=ZlibEncoder::new(Vec::new(),Compression::fast());
+        z.write_all(&rows).unwrap();
+        let compressed=z.finish().unwrap();
+        let mut out=b"\x89PNG\r\n\x1a\n".to_vec();
+        let mut ihdr=Vec::with_capacity(13);
+        ihdr.extend_from_slice(&w.to_be_bytes());
+        ihdr.extend_from_slice(&h.to_be_bytes());
+        ihdr.extend_from_slice(&[8,3,0,0,0]); // palette type 3, 8-bit
+        png_chunk(&mut out,b"IHDR",&ihdr);
+        png_chunk(&mut out,b"PLTE",&[19,25,30, 220,30,40]);
+        png_chunk(&mut out,b"IDAT",&compressed);
+        png_chunk(&mut out,b"IEND",&[]);
+        out
+    }
+    #[test] fn indexed_1280x640_cape_is_transcoded_to_rgba_for_persona(){
+        let original=palette_cape_png(20);
+        assert_eq!(original[25],3);
+        let decoded=validate_png(&original).unwrap();
+        assert_eq!(decoded.dimensions(),(1280,640));
+        let (rgba,changed)=persona_rgba_png(&original,&decoded).unwrap();
+        assert!(changed);
+        assert_eq!(rgba[24],8);
+        assert_eq!(rgba[25],6,"Persona texture must be RGBA8, not indexed PNG");
+        assert_eq!(validate_png(&rgba).unwrap(),decoded);
+        let again=persona_rgba_png(&rgba,&decoded).unwrap();
+        assert_eq!(again.0,rgba);
+        assert!(!again.1,"RGBA8 input must not be rewritten");
+        let id="11111111-2222-4333-8444-555555555555".to_string();
+        let cape=Registry::prepare_cape(id.clone(),"HD".to_string(),"Player",
+            Some(original.clone()),None,"1.0.0",[1,0,0],None,None).unwrap();
+        assert_eq!(cape.dimensions,Some((1280,640)));
+        assert_eq!(cape.png_color_type,Some(3));
+        assert!(cape.persona_rgba_normalized);
+        let module=uuid_from(id.as_bytes(),"resource");
+        let pack=uuid_from(id.as_bytes(),"pack");
+        let version=generated_pack_version("HD",&original,[1,0,0]);
+        let expected=crate::persona_pack::generate("HD",&pack,&module,&rgba,version).unwrap();
+        let served=cape.assets.iter().find(|(path,_)|path.starts_with("/personabinary/")).unwrap();
+        assert_eq!(served.1.data,expected,"downloaded Persona bundle must contain RGBA-converted texture");
+        let thumb=cape.assets.iter().find(|(path,_)|path.starts_with("/thumbnails/")).unwrap();
+        let preview=validate_png(&thumb.1.data).unwrap();
+        assert_eq!(preview.dimensions(),(64,64));
+        assert_eq!(preview.get_pixel(31,33),&Rgba([220,30,40,255]));
+        assert_ne!(preview.get_pixel(31,8),&Rgba([220,30,40,255]),
+            "neutral mannequin head stays above the back cape");
+    }
+    #[test] fn cape_preview_uses_outer_back_uv_not_inner_front(){
+        let mut image=RgbaImage::from_pixel(64,32,Rgba([0,0,0,0]));
+        for y in 1..17 {
+            for x in 1..11{image.put_pixel(x,y,Rgba([0,255,0,255]));}
+            for x in 12..22{image.put_pixel(x,y,Rgba([255,30,20,255]));}
+        }
+        let preview=validate_png(&make_thumbnail(&image).unwrap()).unwrap();
+        assert_eq!(preview.get_pixel(31,33),&Rgba([255,30,20,255]));
+        assert_ne!(preview.get_pixel(31,33),&Rgba([0,255,0,255]));
     }
     #[test] fn one_zip_is_one_cape_without_catalog_files(){
         let root=std::env::temp_dir().join(format!("cosmetics_pack_{}",std::process::id()));

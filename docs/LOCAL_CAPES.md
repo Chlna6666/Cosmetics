@@ -352,3 +352,18 @@ Persona 下载资源的 UUID 取自稳定商品 UUID、包版本、实际 Person
 **重要（2026-10 高清缓存修复）**：对于 Cosmetics 现场生成的 PNG Persona，除下载 URL 外，现在还会按原始 PNG、披风名称、作者设置的版本及生成器版本推导稳定的三段式 `packIdentity.version`。该版本同时写入 Persona 内部 `manifest.header.version`、模块版本、更衣室商品和 `GetPublishedItem`；同样的输入得到相同版本，不同 PNG 不再一直沿用 `1.0.0`。固定商品 ID、包 UUID 不变。**已有原生 Persona ZIP 不改动版本**，保持原始发布者数据。
 
 日志 `ITEM_REGISTERED` 会输出 `pack_version`，用于核对客户端缓存版本。当前 Minecraft 缓存命中规则不是公开的，以上属于避免资源标识不一致的保守措施；并不证明 Minecraft 一定支持 1280×640 的 Persona 原图。完全退出游戏并重新启动后再复测，**若日志没有任何 `LOCAL_CATALOG_SYNTHETIC`、`LOCAL_ASSET_REQUEST`，则这段日志只能证明商品呈现，不能据此断言游戏收到了新版 ZIP**。
+
+## 2026-10：用户实测高清索引 PNG 与更衣室缩略图修复
+
+根据用户上传的两个完整 ZIP 实测：
+
+- `917813.png.zip` 为 1280×640、8-bit **indexed/palette PNG**（PNG color type 3），Cosmetics 旧版本可以解码并生成缩略图，但直接把原始索引 PNG 嵌入加密 Persona 资源。Minecraft 预览未显示实际穿戴。
+- `我的披风1(2).zip` 为 64×32、8-bit **RGBA PNG**（color type 6），用户游戏内穿戴正常。
+
+**修复：** Cosmetics Rust 在生成 **非原生** Persona ZIP 时，检测原始 PNG 编码。对于 indexed、RGB 等非 8-bit RGBA，先由已验证的解码结果重新编码为 **8-bit RGBA PNG**，保持原图分辨率、UV、像素和透明度，不缩放、不转换为 64×32；原本就是 RGBA8 的 PNG 保留原始字节。该规范化只影响游戏内 Persona 资源。预制原生 `persona.zip` 完全保留字节。Python 打包器仍然只包装原始输入，不做任何图片转换。
+
+日志中新增 `source_png_color_type`（3 为索引、6 为 RGBA）及 `persona_rgba_normalized`；用于判断资源链路是否走到转换分支。对于一个 1280×640 palette PNG，期望看到 `source_png_color_type=3 persona_rgba_normalized=true`，然后在按需下载阶段由 WinHTTP 返回已生成的 ZIP。
+
+同时，旧版本地缩略图仅展示一块平面的背面 UV 纹理。新缩略图会将外侧背面 UV（64×32 模板中 `x=12..22, y=1..17`，高清按倍率缩放）渲染到一个中性背部人形示意图上，方便区分披风的实际外侧与内侧。此缩略图是静态离线合成，并不代表游戏内装备状态。
+
+这两项改动分别修复了**上传格式兼容性缺口**与**本地缩略图展示方式**。由于没有来自新 DLL 的游戏端下载、解码及穿戴回调证据，不能只凭单元测试断言 1280×640 的 Persona 在所有 Minecraft 版本中均受支持。若仍不显示，需收集完整点击期间的 `LOCAL_CATALOG_SYNTHETIC`、`LOCAL_ASSET_REQUEST`、`LOCAL_ASSET_RESPONSE_READY` 和 `client_read_complete` 日志。
