@@ -367,3 +367,17 @@ Persona 下载资源的 UUID 取自稳定商品 UUID、包版本、实际 Person
 同时，旧版本地缩略图仅展示一块平面的背面 UV 纹理。新缩略图会将外侧背面 UV（64×32 模板中 `x=12..22, y=1..17`，高清按倍率缩放）渲染到一个中性背部人形示意图上，方便区分披风的实际外侧与内侧。此缩略图是静态离线合成，并不代表游戏内装备状态。
 
 这两项改动分别修复了**上传格式兼容性缺口**与**本地缩略图展示方式**。由于没有来自新 DLL 的游戏端下载、解码及穿戴回调证据，不能只凭单元测试断言 1280×640 的 Persona 在所有 Minecraft 版本中均受支持。若仍不显示，需收集完整点击期间的 `LOCAL_CATALOG_SYNTHETIC`、`LOCAL_ASSET_REQUEST`、`LOCAL_ASSET_RESPONSE_READY` 和 `client_read_complete` 日志。
+
+## 2026-10-17：披风背面 UV 和高分辨率 Persona 兼容性回退
+
+用户在 Minecraft 26.40 实际复测显示：64×32 自制披风能够穿戴，1280×640 原生 PNG 即使经过 RGBA8 转码仍不在角色身上显示。公开的 Bedrock `geometry.cape` 几何使用固定 `texture_width=64`、`texture_height=32`；不能据此保证 Marketplace Persona 解析器接受 20x 高分辨率贴图。为解决当前实测兼容问题，Cosmetics 对 **PNG 实时生成的 Persona** 启用保守的 64×32 UV 兼容纹理：
+
+1. Python 只打包，原始 ZIP 中的 PNG **完全不修改**，Rust 继续读取并解码实际 1280×640 / 512×256 / 128×64。
+2. 商品缩略图从原始完整分辨率取正确的**外侧披风 UV**，比例为 `x=1..11, y=1..17`（高清按 `width/64` 放大）。旧代码错误使用 `x=12..22`，那是披风的内侧。示例「我的披风1(2).zip」的外侧是绿色苦力怕，内侧才是深色「15」，因此此前本地商品预览展示反了。
+3. 真人物的 Persona 64×32 兼容纹理由 Rust 针对每个基础 UV 像素单独执行 **alpha 加权块平均**，避免跨六个不同披风面的混色，导出 RGBA8 PNG；既不把图片放大，也不让用户重新打包。64×32 RGBA8 贴图则直接使用原文件字节。
+4. 变更生成器缓存版本域至 v3，使生成的 `packIdentity.version`、内部 `manifest.json` 和下载资源 URL 全部失效更新，避免继续命中未降采样的旧 Persona 资源。用户原始商品 UUID 不变；对原生预制 Persona ZIP 不做任何修改。
+5. 新日志中原图 `texture=1280x640`，游戏端生成纹理应为 `persona_texture=64x32`；`persona_rgba_normalized=true` 表示运行时纹理被重新编码或降采样。
+
+**兼容性权衡：** Minecraft 预览中的纹理现在按 64×32 输出（20 倍高清细节会损失）。这是针对仍无法显示的 1280×640 的实际可穿戴性回退，并不宣称真正 HD Persona 渲染已经实现。未来若游戏端能接受动态高清披风，需先用实机 trace 证明再允许高清原图直通。
+
+**3D 角色镜头的限制：** 左边的商品缩略图现在显示正确外侧 UV，但更衣室右侧实时 3D 人物是否自动背朝镜头，仍由 Minecraft 客户端内的角色镜头和 `personaOfferInteractionComp` 行为决定。当前 Cosmetics 只有 WinHTTP JSON/下载拦截，没有对 3D 人物预览相机或角色旋转的本地接口。不要混淆商品图片 UV 修复和 3D 角色镜头方向。

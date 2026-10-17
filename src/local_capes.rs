@@ -99,6 +99,54 @@ fn persona_rgba_png(original:&[u8],decoded:&RgbaImage)->Result<(Vec<u8>,bool),St
     }
     Ok((out.into_inner(),true))
 }
+// The standard Bedrock geometry.cape declares a 64x32 atlas. Experimental
+// Persona offers with 20x capes have not loaded on the target game build,
+// even when the PNG is valid RGBA8. Use the full-resolution image for local
+// thumbnails, but expose an UV-equivalent 64x32 *runtime* compatibility
+// texture in the generated Persona. The ZIP/PNG on disk stays unchanged.
+// Block-average each discrete UV texel independently: generic convolution
+// across the atlas can bleed pixels between the outer, lining and edge faces.
+fn cape_compat_rgba(decoded:&RgbaImage)->RgbaImage{
+    let (width,height)=decoded.dimensions();
+    debug_assert!(width%64==0 && height%32==0 && width/64==height/32);
+    let scale=width/64;
+    let mut out=RgbaImage::new(64,32);
+    for y in 0..32 {
+        for x in 0..64 {
+            let mut premul=[0u64;3];
+            let mut total_alpha=0u64;
+            for sy in 0..scale {
+                for sx in 0..scale {
+                    let pixel=decoded.get_pixel(x*scale+sx,y*scale+sy).0;
+                    let a=pixel[3] as u64;
+                    total_alpha+=a;
+                    for channel in 0..3 { premul[channel]+=pixel[channel] as u64*a; }
+                }
+            }
+            let n=(scale*scale) as u64;
+            let a=((total_alpha+n/2)/n) as u8;
+            let rgb=if total_alpha==0{[0,0,0]}else{
+                [
+                    ((premul[0]+total_alpha/2)/total_alpha) as u8,
+                    ((premul[1]+total_alpha/2)/total_alpha) as u8,
+                    ((premul[2]+total_alpha/2)/total_alpha) as u8
+                ]
+            };
+            out.put_pixel(x,y,Rgba([rgb[0],rgb[1],rgb[2],a]));
+        }
+    }
+    out
+}
+fn persona_texture_png(original:&[u8],decoded:&RgbaImage)->Result<(Vec<u8>,bool),String>{
+    if decoded.dimensions()==(64,32){return persona_rgba_png(original,decoded);}
+    let compatible=cape_compat_rgba(decoded);
+    // Force a canonical RGBA8 PNG in the standard Persona atlas size.
+    let mut output=Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(compatible)
+        .write_to(&mut output,ImageFormat::Png)
+        .map_err(|e|format!("Persona compatibility PNG encode failed: {e}"))?;
+    Ok((output.into_inner(),true))
+}
 fn fill_thumb_rect(canvas:&mut RgbaImage,x0:u32,y0:u32,x1:u32,y1:u32,color:Rgba<u8>){
     for y in y0..y1 {
         for x in x0..x1{canvas.put_pixel(x,y,color);}
@@ -107,16 +155,17 @@ fn fill_thumb_rect(canvas:&mut RgbaImage,x0:u32,y0:u32,x1:u32,y1:u32,color:Rgba<
 fn make_thumbnail(image:&RgbaImage)->Result<Vec<u8>,String>{
     let (w,h)=image.dimensions();
     // The Minecraft cape texture is a UV sheet, not a square marketplace
-    // thumbnail. For 64x32 textures the visible back is x=12..22,y=1..17.
+    // thumbnail. For 64x32 textures the OUTER back is x=1..11,y=1..17.
     let face=if w%64==0 && h%32==0 && w/64==h/32 {
         let scale=w/64;
-        imageops::crop_imm(image,12*scale,scale,10*scale,16*scale).to_image()
+        imageops::crop_imm(image,scale,scale,10*scale,16*scale).to_image()
     }else{
         image.clone()
     };
     // Preview the cape on the *back* of a neutral mannequin, not a flat
-    // texture tile. The cape's visible outer back is UV x=12..22 on the
-    // standard 64x32 atlas (Minecraft cape cube origin UV [0,0]).
+    // texture tile. For vanilla geometry.cape with a 180 degree cape-bone
+    // rotation, the outer face is UV x=1..11; x=12..22 is the lining.
+    // The original texture is never mirrored, and scale is derived at runtime.
     let resized=imageops::resize(&face,34,43,imageops::FilterType::Nearest);
     let mut canvas=RgbaImage::from_pixel(64,64,Rgba([40,43,48,255]));
     // Mannequin: neck/head, shoulders, arms and feet remain visible behind
@@ -156,7 +205,7 @@ fn valid_uuid(id:&str)->bool{crate::persona::is_uuid(id)}
 // Native user-provided Persona versions are never replaced.
 fn generated_pack_version(name:&str,png:&[u8],author_version:[u32;3])->[u32;3] {
     let mut hash=Sha256::new();
-    hash.update(b"Cosmetics/generated-persona-cache-version/v2");
+    hash.update(b"Cosmetics/generated-persona-cache-version/v3");
     hash.update(author_version[0].to_le_bytes());
     hash.update(author_version[1].to_le_bytes());
     hash.update(author_version[2].to_le_bytes());
@@ -276,6 +325,7 @@ struct PreparedCape {
     dimensions:Option<(u32,u32)>,
     png_color_type:Option<u8>,
     persona_rgba_normalized:bool,
+    persona_texture_dimensions:Option<(u32,u32)>,
 }
 fn version_parts(version:&str)->Result<[u32;3],String>{
     let parts:Vec<_>=version.split('.').collect();
@@ -405,8 +455,9 @@ impl Registry {
                         let size=entry.dimensions.map_or("none".to_string(),|(w,h)|
                             format!("{w}x{h} scale={}x",w/64));
                         reg.diagnostics.push(format!(
-                            "CAPE_REGISTERED {label} index={} texture={} source_png_color_type={} persona_rgba_normalized={} payload={} game_accepted=UNVERIFIED{}",
-                            index+1,size,entry.png_color_type.map_or("none".to_string(),|x|x.to_string()),
+                            "CAPE_REGISTERED {label} index={} texture={} persona_texture={} source_png_color_type={} persona_rgba_normalized={} payload={} game_accepted=UNVERIFIED{}",
+                            index+1,size,entry.persona_texture_dimensions.map_or("native".into(),|(w,h)|format!("{w}x{h}")),
+                            entry.png_color_type.map_or("none".to_string(),|x|x.to_string()),
                             entry.persona_rgba_normalized,
                             if entry.native{"native_persona"}else{"generated_persona_cfb8"},
                             if entry.native {""} else {" metadata_generated=true game_acceptance_unverified=true"}));
@@ -581,7 +632,7 @@ impl Registry {
             None=>{
                 let source=png.as_deref().ok_or("missing cape PNG")?;
                 let decoded=decoded.as_ref().ok_or("missing decoded cape PNG")?;
-                let (texture,converted)=persona_rgba_png(source,decoded)?;
+                let (texture,converted)=persona_texture_png(source,decoded)?;
                 converted_rgba=converted;
                 experimental_persona_png(&name,&generated_pack_uuid,
                     &module_uuid,&texture,generated_version.unwrap_or(version))?
@@ -644,7 +695,8 @@ impl Registry {
         }
         Ok(PreparedCape{id:item_id,item,catalog:serde_json::to_vec(&catalog)
             .map_err(|e|e.to_string())?,assets,native,dimensions,
-            png_color_type,persona_rgba_normalized:converted_rgba})
+            png_color_type,persona_rgba_normalized:converted_rgba,
+            persona_texture_dimensions:(!native && decoded.is_some()).then_some((64,32))})
     }
 }
 
@@ -654,7 +706,7 @@ mod tests{
     fn dummy_png()->Vec<u8>{
         let mut img=RgbaImage::from_pixel(64,32,Rgba([0,0,0,0]));
         // UV back face should be visible in preview, not flattened gibberish.
-        for y in 1..17 {for x in 12..22 { img.put_pixel(x,y,Rgba([220,30,30,255])); }}
+        for y in 1..17 {for x in 1..11 { img.put_pixel(x,y,Rgba([220,30,30,255])); }}
         let mut out=Cursor::new(Vec::new());
         image::DynamicImage::ImageRgba8(img).write_to(&mut out,ImageFormat::Png).unwrap();
         out.into_inner()
@@ -701,7 +753,7 @@ mod tests{
         for y in 0..h {
             rows.push(0); // no PNG row filter
             for x in 0..w{
-                rows.push(u8::from(x>=12*scale && x<22*scale
+                rows.push(u8::from(x>=scale && x<11*scale
                     && y>=scale && y<17*scale));
             }
         }
@@ -724,24 +776,32 @@ mod tests{
         assert_eq!(original[25],3);
         let decoded=validate_png(&original).unwrap();
         assert_eq!(decoded.dimensions(),(1280,640));
+        // The raw RGBA conversion keeps its original dimensions, but the
+        // game's generated Persona receives the fallback 64x32 atlas.
         let (rgba,changed)=persona_rgba_png(&original,&decoded).unwrap();
         assert!(changed);
         assert_eq!(rgba[24],8);
-        assert_eq!(rgba[25],6,"Persona texture must be RGBA8, not indexed PNG");
+        assert_eq!(rgba[25],6);
         assert_eq!(validate_png(&rgba).unwrap(),decoded);
-        let again=persona_rgba_png(&rgba,&decoded).unwrap();
-        assert_eq!(again.0,rgba);
-        assert!(!again.1,"RGBA8 input must not be rewritten");
+        let (compatible,converted)=persona_texture_png(&original,&decoded).unwrap();
+        assert!(converted);
+        assert_eq!(compatible[25],6);
+        let reduced=validate_png(&compatible).unwrap();
+        assert_eq!(reduced.dimensions(),(64,32));
+        assert_eq!(reduced.get_pixel(4,5),&Rgba([220,30,40,255]));
+        let small=persona_texture_png(&dummy_png(),&validate_png(&dummy_png()).unwrap()).unwrap();
+        assert!(!small.1,"already compatible RGBA8 must stay byte-identical");
         let id="11111111-2222-4333-8444-555555555555".to_string();
         let cape=Registry::prepare_cape(id.clone(),"HD".to_string(),"Player",
             Some(original.clone()),None,"1.0.0",[1,0,0],None,None).unwrap();
         assert_eq!(cape.dimensions,Some((1280,640)));
+        assert_eq!(cape.persona_texture_dimensions,Some((64,32)));
         assert_eq!(cape.png_color_type,Some(3));
         assert!(cape.persona_rgba_normalized);
         let module=uuid_from(id.as_bytes(),"resource");
         let pack=uuid_from(id.as_bytes(),"pack");
         let version=generated_pack_version("HD",&original,[1,0,0]);
-        let expected=crate::persona_pack::generate("HD",&pack,&module,&rgba,version).unwrap();
+        let expected=crate::persona_pack::generate("HD",&pack,&module,&compatible,version).unwrap();
         let served=cape.assets.iter().find(|(path,_)|path.starts_with("/personabinary/")).unwrap();
         assert_eq!(served.1.data,expected,"downloaded Persona bundle must contain RGBA-converted texture");
         let thumb=cape.assets.iter().find(|(path,_)|path.starts_with("/thumbnails/")).unwrap();
@@ -751,6 +811,21 @@ mod tests{
         assert_ne!(preview.get_pixel(31,8),&Rgba([220,30,40,255]),
             "neutral mannequin head stays above the back cape");
     }
+    #[test] fn uv_compat_downsample_keeps_separate_faces_and_alpha(){
+        let mut source=RgbaImage::from_pixel(128,64,Rgba([0,0,0,0]));
+        for y in 2..34{
+            for x in 2..22{source.put_pixel(x,y,Rgba([255,0,0,255]));}
+            for x in 24..44{source.put_pixel(x,y,Rgba([0,255,0,255]));}
+        }
+        let out=cape_compat_rgba(&source);
+        assert_eq!(out.dimensions(),(64,32));
+        assert_eq!(out.get_pixel(4,5),&Rgba([255,0,0,255]));
+        assert_eq!(out.get_pixel(15,5),&Rgba([0,255,0,255]));
+        assert_eq!(out.get_pixel(22,5),&Rgba([0,0,0,0]));
+        assert_eq!(out.get_pixel(0,0),&Rgba([0,0,0,0]));
+        assert_eq!(out.get_pixel(11,5),&Rgba([0,0,0,0]),
+            "outer face and lining must not bleed across UV boundary");
+    }
     #[test] fn cape_preview_uses_outer_back_uv_not_inner_front(){
         let mut image=RgbaImage::from_pixel(64,32,Rgba([0,0,0,0]));
         for y in 1..17 {
@@ -758,8 +833,8 @@ mod tests{
             for x in 12..22{image.put_pixel(x,y,Rgba([255,30,20,255]));}
         }
         let preview=validate_png(&make_thumbnail(&image).unwrap()).unwrap();
-        assert_eq!(preview.get_pixel(31,33),&Rgba([255,30,20,255]));
-        assert_ne!(preview.get_pixel(31,33),&Rgba([0,255,0,255]));
+        assert_eq!(preview.get_pixel(31,33),&Rgba([0,255,0,255]));
+        assert_ne!(preview.get_pixel(31,33),&Rgba([255,30,20,255]));
     }
     #[test] fn one_zip_is_one_cape_without_catalog_files(){
         let root=std::env::temp_dir().join(format!("cosmetics_pack_{}",std::process::id()));
@@ -1094,7 +1169,7 @@ mod tests{
         assert!(version_parts("1.2").is_err());
         assert!(version_parts("1.2.999999").is_err());
     }
-    #[test] fn high_resolution_png_uv_is_preserved_in_generated_persona_zip(){
+    #[test] fn high_resolution_source_uv_is_preserved_and_persona_uses_64x32_compat(){
         for (scale,w,h) in [(2,128,64),(4,256,128),(8,512,256),(20,1280,640)]{
             let root=std::env::temp_dir().join(format!(
                 "cosmetics_hires_{}_{}",std::process::id(),scale));
@@ -1102,7 +1177,7 @@ mod tests{
             fs::create_dir_all(root.join("capes")).unwrap();
             let mut image=RgbaImage::from_pixel(w,h,Rgba([0,0,0,0]));
             for y in scale..17*scale{
-                for x in 12*scale..22*scale {image.put_pixel(x,y,Rgba([200,50,80,255]));}
+                for x in scale..11*scale {image.put_pixel(x,y,Rgba([200,50,80,255]));}
             }
             let mut encoded=Cursor::new(Vec::new());
             image::DynamicImage::ImageRgba8(image)
@@ -1114,6 +1189,7 @@ mod tests{
             let reg=Registry::scan(&root);
             assert_eq!(reg.accepted,1,"{:?}",reg.diagnostics);
             assert_eq!(reg.generated_persona_payloads,1);
+            assert!(reg.diagnostics.iter().any(|line|line.contains("persona_texture=64x32")));
             let data=reg.assets.values().find(|v|v.kind==AssetType::PersonaZip).unwrap();
             let mut outer=ZipArchive::new(Cursor::new(&data.data)).unwrap();
             let mut nested=Vec::new();
