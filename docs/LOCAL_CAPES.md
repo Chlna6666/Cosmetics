@@ -259,3 +259,11 @@ PNG-only 路径会自动生成带有 `manifest.json`、明文 `contents.json`、
 单披风 `cape.json` 或多披风 `pack.json.capes[]` 可以额外声明 `rarity`（common、uncommon、rare、epic、legendary）以及真实的 `startDate`（格式 `YYYY-MM-DDTHH:MM:SSZ`），缺省时不伪造发布日期。商品与 GetPublishedItem 的 `Id`、`packIdentity` 完全一致。对于仅含原生 `persona.zip` 而没有单独贴图的条目，会生成一个可响应的占位缩略图，避免空资源 URL。
 
 Cosmos 的 `linksToInfo`、`namedLinksToInfoMap` 指向专门的 CustomCapes Persona 页面。Cosmetics 默认关闭该页面路由，因此不能简单复制这个链接，否则会造成新的无效导航。当前仍允许在更衣室通过 `personaOfferInteractionComp` 交互。列表元数据完善并不等于游戏已接受或装备实验性 PNG-only Persona ZIP；那还要求内部 Persona 资源被客户端真正解析。
+
+## v0.1.14 Persona binary packaging follow-up (2026-10-17)
+
+The game's first requests for both locally generated Persona ZIPs used **HEAD**, not GET. Older Cosmetics returned HTTP **405**. Virtual HEAD now replies **200** with the same resource type and Content-Length as GET, without a body. Unknown URLs return 404, unrelated methods 405. This fix does not alter marketplace responses or entitlements.
+
+Cosmos and MerelyCapes `personabinary` downloads consist of an outer ZIP containing `ppack0.zip`. The MerelyCapes reference (MIT licensed) generates `*_cape.meta.json` with `piece_id`, `piece_name`, `piece_type=persona_capes`, `zone=[body_back_upper,body_back_lower]` and `texture_sources`. Cosmetics PNG-only imports now use that layout, include the manifest SHA-256 digest in `signatures.json`, and encode resource files and `contents.json` in the same **AES-256/CFB8** format as the public MerelyCapes generator. File keys are reproducibly derived for stable local registration; this is format interoperability, **not Mojang attestation, official inventory, or a guarantee of equip success**. Native, already-bundled Persona assets are passed through byte-for-byte. Bare native Persona packs are wrapped in `ppack0.zip` before being served.
+
+The source and reference have different security contexts: these resources are authored and used locally, not signed by Mojang. Successful tests prove local ZIP/encryption structure but not the game's Persona acceptance. With the new DLL, confirm `LOCAL_ASSET_RESPONSE_READY method=HEAD status=200`, any subsequent GET, complete data delivery, and actual avatar preview. Earlier documentation referring to the unencrypted/metadata-less generator describes superseded builds.

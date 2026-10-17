@@ -227,11 +227,11 @@ unsafe extern "system" fn worker(module: H) -> u32 {
     logger("Support: https://github.com/Chlna6666/Cosmetics/issues");
     logger("Scope: local cape catalog, virtual thumbnails and Persona download; no Minecraft skin/equip hook");
     logger("Standalone native WinHTTP DLL | logs=logs/cosmetics.log | debugger=OutputDebugStringW");
-    logger(&format!("local_capes ZIP_SCAN complete discovered={} validated={} rejected={} skipped={} registered_items={} registered_assets={} native_persona={} experimental_plaintext={} in_game_loaded=UNVERIFIED",
+    logger(&format!("local_capes ZIP_SCAN complete discovered={} validated={} rejected={} skipped={} registered_items={} registered_assets={} native_persona={} generated_persona={} in_game_loaded=UNVERIFIED",
         registry.discovered_zip,registry.accepted,registry.rejected,
         registry.discovered_zip.saturating_sub(registry.accepted+registry.rejected),
         local_capes::count(),registry.asset_count(),
-        registry.native_payloads,registry.plaintext_experimental_payloads));
+        registry.native_payloads,registry.generated_persona_payloads));
     for diagnostic in &registry.diagnostics {logger(&format!("local_capes: {diagnostic}"));}
     for (index,item) in local_capes::items().iter().enumerate(){
         let id=item.get("id").and_then(|v|v.as_str()).unwrap_or("?");

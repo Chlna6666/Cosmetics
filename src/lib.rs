@@ -7,6 +7,7 @@ pub mod codec;
 pub mod persona;
 pub mod resources;
 pub mod local_capes;
+pub mod persona_pack;
 pub mod cape_sections;
 
 #[cfg(windows)]

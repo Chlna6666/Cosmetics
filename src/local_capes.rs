@@ -47,7 +47,7 @@ pub struct Registry {
     pub accepted:usize,
     pub rejected:usize,
     pub native_payloads:usize,
-    pub plaintext_experimental_payloads:usize,
+    pub generated_persona_payloads:usize,
 }
 static REGISTRY:OnceLock<Registry>=OnceLock::new();
 pub fn initialize(root:&Path)->&'static Registry {
@@ -111,7 +111,29 @@ fn uuid_from(seed:&[u8],kind:&str)->String {
 fn valid_uuid(id:&str)->bool{crate::persona::is_uuid(id)}
 #[derive(Clone,Debug,PartialEq,Eq)]
 struct NativeIdentity {uuid:String,version:String}
+fn is_binary_bundle(bytes:&[u8])->Result<bool,String>{
+    let zip=ZipArchive::new(Cursor::new(bytes))
+        .map_err(|e|format!("persona ZIP invalid: {e}"))?;
+    Ok(zip.file_names().any(|name|name=="ppack0.zip"))
+}
 fn validate_native(bytes:&[u8])->Result<NativeIdentity,String>{
+    // Native Persona data can be a direct pack or a catalog personabinary
+    // bundle enclosing ppack0.zip. Validate the inner manifest in both cases.
+    let nested=if is_binary_bundle(bytes)?{
+        let mut bundle=ZipArchive::new(Cursor::new(bytes))
+            .map_err(|e|format!("persona bundle invalid: {e}"))?;
+        if bundle.len()>64{return Err("persona bundle has too many members".into());}
+        let mut file=bundle.by_name("ppack0.zip").map_err(|e|e.to_string())?;
+        if file.size()==0 || file.size()>MAX_NATIVE as u64 {
+            return Err("ppack0.zip exceeds Persona native size limit".into());
+        }
+        let mut inner=Vec::new();
+        file.by_ref().take(MAX_NATIVE as u64+1).read_to_end(&mut inner)
+            .map_err(|e|e.to_string())?;
+        if inner.len()>MAX_NATIVE{return Err("ppack0.zip too large".into());}
+        Some(inner)
+    }else{None};
+    let bytes=nested.as_deref().unwrap_or(bytes);
     let mut zip=ZipArchive::new(Cursor::new(bytes))
         .map_err(|e|format!("native persona.zip invalid: {e}"))?;
     if zip.len()>1024{return Err("native persona.zip has too many members".into());}
@@ -149,33 +171,11 @@ fn validate_native(bytes:&[u8])->Result<NativeIdentity,String>{
     };
     Ok(NativeIdentity{uuid,version})
 }
-fn experimental_persona_png(name:&str,pack_uuid:&str,module_uuid:&str,png:&[u8],version:[u32;3])->Result<Vec<u8>,String>{
-    // This is a plaintext, *experimental* Persona resource payload, not a
-    // verified Minecraft Marketplace personabinary file or signed package.
-    let manifest=json!({
-        "format_version":1,
-        "header":{"name":"pack.name","description":"pack.description",
-                  "uuid":pack_uuid,"version":version,"min_engine_version":[1,16,0]},
-        "modules":[{"type":"persona_piece","uuid":module_uuid,"version":version}]
-    });
-    // Bedrock's plaintext contents.json lists the files within the pack;
-    // it does not turn a PNG into the proprietary Persona .meta.json payload.
-    let files=json!({"content":[{"path":"manifest.json"},{"path":"textures/cape.png"},
-        {"path":"texts/en_US.lang"},{"path":"texts/languages.json"},{"path":"contents.json"}]});
-    let mut writer=ZipWriter::new(Cursor::new(Vec::new()));
-    let options=SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-    for (path,data) in [
-        ("manifest.json",serde_json::to_vec(&manifest).map_err(|e|e.to_string())?),
-        ("contents.json",serde_json::to_vec(&files).map_err(|e|e.to_string())?),
-        ("textures/cape.png",png.to_vec()),
-        ("texts/en_US.lang",format!("pack.name={}\npack.description=Cosmetics local cape\n",name.replace('\r'," ").replace('\n'," ")).into_bytes()),
-        ("texts/languages.json",br#"["en_US"]"#.to_vec())
-    ] {
-        writer.start_file(path,options).map_err(|e|e.to_string())?;
-        writer.write_all(&data).map_err(|e|e.to_string())?;
-    }
-    Ok(writer.finish().map_err(|e|e.to_string())?.into_inner())
+fn experimental_persona_png(name:&str,pack_uuid:&str,module_uuid:&str,
+    png:&[u8],version:[u32;3])->Result<Vec<u8>,String>{
+    crate::persona_pack::generate(name,pack_uuid,module_uuid,png,version)
 }
+
 fn name_ok(input:&str)->bool{
     !input.is_empty() && input.chars().count()<=90 && !input.chars().any(char::is_control)
 }
@@ -341,8 +341,8 @@ impl Registry {
                             format!("{w}x{h} scale={}x",w/64));
                         reg.diagnostics.push(format!(
                             "CAPE_REGISTERED {label} index={} texture={} payload={} game_accepted=UNVERIFIED{}",
-                            index+1,size,if entry.native{"native_persona"}else{"experimental_plaintext"},
-                            if entry.native {""} else {" missing_proprietary_persona_meta=true"}));
+                            index+1,size,if entry.native{"native_persona"}else{"generated_persona_cfb8"},
+                            if entry.native {""} else {" metadata_generated=true game_acceptance_unverified=true"}));
                         item_ids.insert(entry.id.clone());
                         reg.catalogs.insert(entry.id,entry.catalog);
                         for (path,asset) in entry.assets {
@@ -350,7 +350,7 @@ impl Registry {
                             reg.assets.insert(path,asset);
                         }
                         if entry.native{reg.native_payloads+=1}
-                        else{reg.plaintext_experimental_payloads+=1}
+                        else{reg.generated_persona_payloads+=1}
                         reg.items.push(entry.item);
                     }
                     reg.accepted+=1;
@@ -507,7 +507,10 @@ impl Registry {
                 uuid:generated_pack_uuid.clone(),version:version_text.to_owned()
             });
         let persona=match original {
-            Some(data)=>data,
+            // Keep authentic catalog bundles unchanged; wrap bare Persona
+            // packs in the Cosmos-compatible ppack0.zip envelope.
+            Some(data)=>if is_binary_bundle(&data)?{data}
+                else{crate::persona_pack::bundle_pack(&data)?},
             None=>experimental_persona_png(&name,&generated_pack_uuid,
                 &old_resource_id,&png.ok_or("missing cape PNG")?,version)?
         };
@@ -594,7 +597,7 @@ mod tests{
         let reg=Registry::scan(&root);
         assert_eq!(reg.items.len(),1,"{:?}",reg.diagnostics);
         assert_eq!((reg.discovered_zip,reg.accepted,reg.rejected), (1,1,0));
-        assert_eq!(reg.plaintext_experimental_payloads,1);
+        assert_eq!(reg.generated_persona_payloads,1);
         assert_eq!(reg.items[0]["title"],"Red Cape");
         assert_eq!(reg.items[0]["ownership"],"Purchased");
         let id=reg.items[0]["id"].as_str().unwrap();
@@ -608,28 +611,31 @@ mod tests{
         assert_eq!(preview.dimensions(),(64,64));
         assert_eq!(preview.get_pixel(32,32),&Rgba([220,30,30,255]));
         let native=&reg.assets.get(path).unwrap().data;
-        let mut zip=ZipArchive::new(Cursor::new(native)).unwrap();
-        assert!(zip.by_name("textures/cape.png").is_ok());
+        let mut outer=ZipArchive::new(Cursor::new(native)).unwrap();
+        let mut pack=Vec::new();
+        outer.by_name("ppack0.zip").unwrap().read_to_end(&mut pack).unwrap();
+        let mut zip=ZipArchive::new(Cursor::new(pack)).unwrap();
+        assert!(zip.file_names().any(|name|name.ends_with("_cape.png")));
         let manifest:Value=serde_json::from_reader(zip.by_name("manifest.json").unwrap()).unwrap();
         assert_eq!(manifest["header"]["uuid"],reg.items[0]["packIdentity"][0]["uuid"]);
         assert_ne!(manifest["modules"][0]["uuid"],manifest["header"]["uuid"]);
         let _=fs::remove_dir_all(&root);
     }
-    #[test] fn plaintext_persona_has_version_one_manifest_and_complete_file_index() {
+    #[test] fn generated_persona_uses_cosmos_bundle_and_encrypted_index() {
         let data=experimental_persona_png("Local Test","11111111-2222-4333-8444-555555555555",
             "66666666-2222-4333-8444-555555555555",&dummy_png(),[1,0,0]).unwrap();
-        let mut archive=ZipArchive::new(Cursor::new(data)).unwrap();
+        let mut outer=ZipArchive::new(Cursor::new(data)).unwrap();
+        assert_eq!(outer.len(),1);
+        let mut nested=Vec::new();
+        outer.by_name("ppack0.zip").unwrap().read_to_end(&mut nested).unwrap();
+        let mut archive=ZipArchive::new(Cursor::new(nested)).unwrap();
         let manifest:Value=serde_json::from_reader(archive.by_name("manifest.json").unwrap()).unwrap();
         assert_eq!(manifest["format_version"],1);
-        let index:Value=serde_json::from_reader(archive.by_name("contents.json").unwrap()).unwrap();
-        let names:Vec<String>=index["content"].as_array().unwrap().iter()
-            .map(|entry|entry["path"].as_str().unwrap().to_owned()).collect();
-        for name in &names { assert!(archive.by_name(name).is_ok(),"missing {name}"); }
-        assert!(names.contains(&"textures/cape.png".to_string()));
-        assert!(names.contains(&"texts/languages.json".to_string()));
-        // Not a signed Persona package: presence of a manifest alone cannot
-        // establish that Minecraft has loaded or equipped this cape.
-        assert!(archive.by_name("signatures.json").is_err());
+        assert!(archive.file_names().any(|path|path.ends_with("_cape.meta.json")));
+        let mut index=Vec::new();
+        archive.by_name("contents.json").unwrap().read_to_end(&mut index).unwrap();
+        assert_eq!(&index[4..8],&2614082044u32.to_le_bytes());
+        assert!(archive.by_name("signatures.json").is_ok());
     }
     #[test] fn local_item_metadata_keeps_cosmos_thumbnail_fields() {
         let root=std::env::temp_dir().join(format!("cosmetics_thumbs_{}",std::process::id()));
@@ -753,7 +759,7 @@ mod tests{
         assert_eq!(registry.accepted,1);
         assert_eq!(registry.rejected,1);
         assert_eq!(registry.asset_count(),2);
-        assert_eq!(registry.plaintext_experimental_payloads,1);
+        assert_eq!(registry.generated_persona_payloads,1);
         assert_eq!(registry.native_payloads,0);
         let _=fs::remove_dir_all(&root);
     }
@@ -795,7 +801,7 @@ mod tests{
         assert_eq!(a.accepted,1);
         assert_eq!(a.items.len(),2);
         assert_eq!(a.assets.len(),4);
-        assert_eq!(a.plaintext_experimental_payloads,2);
+        assert_eq!(a.generated_persona_payloads,2);
         assert_eq!(a.items[0]["title"],"Red Cape");
         assert_eq!(a.items[1]["title"],"Blue Cape");
         fs::rename(root.join("capes/old-name.zip"),root.join("capes/renamed.zip")).unwrap();
@@ -872,13 +878,19 @@ mod tests{
             outer.finish().unwrap();
             let reg=Registry::scan(&root);
             assert_eq!(reg.accepted,1,"{:?}",reg.diagnostics);
-            assert_eq!(reg.plaintext_experimental_payloads,1);
+            assert_eq!(reg.generated_persona_payloads,1);
             let data=reg.assets.values().find(|v|v.kind==AssetType::PersonaZip).unwrap();
-            let mut inner=ZipArchive::new(Cursor::new(&data.data)).unwrap();
-            let mut original=Vec::new();
-            inner.by_name("textures/cape.png").unwrap()
-                .read_to_end(&mut original).unwrap();
-            let decoded=validate_png(&original).unwrap();
+            let mut outer=ZipArchive::new(Cursor::new(&data.data)).unwrap();
+            let mut nested=Vec::new();
+            outer.by_name("ppack0.zip").unwrap().read_to_end(&mut nested).unwrap();
+            let mut inner=ZipArchive::new(Cursor::new(nested)).unwrap();
+            let texture=inner.file_names().find(|path|path.ends_with("_cape.png"))
+                .unwrap().to_string();
+            let mut encrypted=Vec::new();
+            inner.by_name(&texture).unwrap().read_to_end(&mut encrypted).unwrap();
+            assert_ne!(encrypted.as_slice(),encoded.get_ref().as_slice(),"PNG must be encrypted");
+            assert_eq!(encrypted.len()%16,0);
+            let decoded=validate_png(encoded.get_ref()).unwrap();
             assert_eq!(decoded.dimensions(),(w,h));
             assert!(reg.diagnostics.iter().any(|line|
                 line.contains(&format!("texture={w}x{h}"))));
