@@ -14,7 +14,7 @@ from zipfile import ZipFile, BadZipFile
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 MAX_PNG = 8 * 1024 * 1024
 MAX_NATIVE = 64 * 1024 * 1024
-MAX_FILES = 256
+MAX_FILES = 1024
 MAX_OUTER = 64 * 1024 * 1024
 ALLOWED_RARITIES = {"common", "uncommon", "rare", "epic", "legendary"}
 
@@ -102,7 +102,7 @@ def validate_native(path):
     binary = path.read_bytes()
     try:
         with ZipFile(path) as outer:
-            if len(outer.infolist()) > MAX_FILES:
+            if len(outer.infolist()) > 64:
                 raise ValueError("native Persona ZIP has too many entries")
             if "ppack0.zip" in outer.namelist():
                 member = outer.getinfo("ppack0.zip")
@@ -126,14 +126,26 @@ def check_manifest(archive):
         raise ValueError("native Persona manifest too large")
     manifest = json.loads(archive.read(item))
     modules = manifest.get("modules", [])
-    if not isinstance(modules, list) or not any(
-            isinstance(m, dict) and m.get("type") == "persona_piece" for m in modules):
+    if not isinstance(modules, list):
+        raise ValueError("native Persona modules must be a list")
+    module = next((m for m in modules
+        if isinstance(m, dict) and m.get("type") == "persona_piece"), None)
+    if module is None:
         raise ValueError("native Persona pack must contain persona_piece module")
     header = manifest.get("header", {})
     try:
-        uuid.UUID(header["uuid"])
+        for identifier in (header["uuid"], module["uuid"]):
+            if not isinstance(identifier, str) or str(uuid.UUID(identifier)) != identifier.lower():
+                raise ValueError("non-canonical UUID")
     except (KeyError, ValueError, TypeError) as exc:
-        raise ValueError("native Persona header.uuid must be UUID") from exc
+        raise ValueError("native Persona header/module uuid must be canonical UUID") from exc
+    version = header.get("version")
+    valid_version = (isinstance(version, list) and len(version) == 3
+        and all(isinstance(n, int) and not isinstance(n, bool) and n >= 0 for n in version))
+    valid_version = valid_version or (isinstance(version, str)
+        and bool(re.fullmatch(r"\d+(\.\d+)+", version)))
+    if not valid_version:
+        raise ValueError("native Persona header.version must be 3 integers or dotted string")
     return manifest
 def safe_filename(name):
     base = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', name).strip('. ')

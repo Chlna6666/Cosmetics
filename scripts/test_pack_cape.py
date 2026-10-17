@@ -85,6 +85,34 @@ class PackTests(unittest.TestCase):
             with ZipFile(output) as archive:
                 self.assertEqual(archive.read("persona.zip"),binary)
                 self.assertNotIn("cape.png",archive.namelist())
+    def test_native_many_frame_files_are_kept_untouched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            inner=io.BytesIO()
+            with ZipFile(inner,"w") as archive:
+                archive.writestr("manifest.json",json.dumps({
+                    "header":{"uuid":str(uuid.uuid4()),"version":[1,0,0]},
+                    "modules":[{"type":"persona_piece","uuid":str(uuid.uuid4())}]}))
+                for i in range(300):
+                    archive.writestr(f"frames/{i:04}.png",b"x")
+            outer=io.BytesIO()
+            with ZipFile(outer,"w") as archive:
+                archive.writestr("ppack0.zip",inner.getvalue())
+            input_zip=root/"many.persona.zip"
+            input_zip.write_bytes(outer.getvalue())
+            out=module.create(None,root/"many.zip",persona_zip=input_zip)
+            with ZipFile(out) as archive:
+                self.assertEqual(archive.read("persona.zip"),outer.getvalue())
+    def test_reject_native_missing_module_uuid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            native=root/"invalid.persona.zip"
+            with ZipFile(native,"w") as archive:
+                archive.writestr("manifest.json",json.dumps({
+                    "header":{"uuid":str(uuid.uuid4()),"version":[1,0,0]},
+                    "modules":[{"type":"persona_piece"}]}))
+            with self.assertRaisesRegex(ValueError,"module uuid"):
+                module.create(None,root/"invalid.zip",persona_zip=native)
     def test_reject_invalid_png_and_animated_spritesheet_not_cape_uv(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)
