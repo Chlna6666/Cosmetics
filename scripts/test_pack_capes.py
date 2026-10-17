@@ -75,7 +75,7 @@ class MultiCapePackTests(unittest.TestCase):
                 module.create(folder,Path(td)/"one.zip")
             self.assertEqual((folder/"pack.json").read_bytes(),manifest)
 
-    def test_high_resolution_metadata_and_existing_manual_rarity(self):
+    def test_hd_png_is_preserved_without_python_resolution_metadata(self):
         with tempfile.TemporaryDirectory() as td:
             folder=Path(td)/"hires"
             folder.mkdir()
@@ -83,8 +83,9 @@ class MultiCapePackTests(unittest.TestCase):
             destination=Path(td)/"collection.zip"
             module.create(folder,destination,rarity="legendary")
             meta=json.loads((folder/"pack.json").read_text())
-            self.assertEqual(meta["capes"][0]["texture_info"],
-                {"width":1280,"height":640,"scale":20,"uv":"bedrock_64x32"})
+            self.assertNotIn("texture_info",meta["capes"][0])
+            with ZipFile(destination) as archive:
+                self.assertEqual(archive.read("textures/4k.png"),(folder/"4k.png").read_bytes())
             self.assertEqual(meta["capes"][0]["rarity"],"legendary")
             persisted=meta["capes"][0]["uuid"]
             module.create(folder,destination)
@@ -118,8 +119,9 @@ class MultiCapePackTests(unittest.TestCase):
                 capes=json.loads(archive.read("pack.json"))["capes"]
                 self.assertEqual(len(capes),1)
                 self.assertEqual(archive.read("native/foo.zip"),original)
-                self.assertEqual(capes[0]["texture_info"]["scale"],2)
-    def test_invalid_uv_does_not_replace_old_multi_zip(self):
+                self.assertNotIn("texture_info",capes[0])
+                self.assertEqual(archive.read("textures/foo.png"),(folder/"foo.png").read_bytes())
+    def test_invalid_png_header_does_not_replace_old_multi_zip(self):
         with tempfile.TemporaryDirectory() as td:
             folder=Path(td)/"source"
             folder.mkdir()
@@ -129,8 +131,8 @@ class MultiCapePackTests(unittest.TestCase):
             module.create(folder,target)
             original=target.read_bytes()
             manifest=(folder/"pack.json").read_bytes()
-            file.write_bytes(png_header(64,64))
-            with self.assertRaisesRegex(ValueError,"cape UV"):
+            file.write_bytes(b"not a png")
+            with self.assertRaisesRegex(ValueError,"PNG"):
                 module.create(folder,target)
             self.assertEqual(original,target.read_bytes())
             self.assertEqual(manifest,(folder/"pack.json").read_bytes())

@@ -11,7 +11,7 @@ import uuid
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from cape_pack_utils import (check_png, texture_info, valid_name, validated_rarity,
+from cape_pack_utils import (check_png, valid_name, validated_rarity,
                              validated_start_date, validate_native)
 
 
@@ -78,7 +78,8 @@ def create(source, destination=None, name=None, author=None, version=None, rarit
     for stem in stems:
         png, native = by_stem.get(stem), native_stems.get(stem)
         img = png.read_bytes() if png else None
-        dimensions = check_png(img) if img is not None else None
+        if img is not None:
+            check_png(img)
         original = validate_native(native) if native else None
         path_png = f"textures/{stem}.png" if png else None
         path_native = f"native/{stem}.zip" if native else None
@@ -92,7 +93,6 @@ def create(source, destination=None, name=None, author=None, version=None, rarit
                 "name": valid_name(last.get("name") or stem, "cape name")}
         if path_png:
             item["texture"] = path_png
-            item["texture_info"] = texture_info(*dimensions)
             paths.append((path_png, img))
         if path_native:
             item["persona_zip"] = path_native

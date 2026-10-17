@@ -61,9 +61,8 @@ class PackTests(unittest.TestCase):
                 self.assertEqual(meta["name"],"Local test")
                 self.assertEqual(meta["author"],"Me")
                 self.assertEqual(meta["rarity"],"epic")
-                self.assertEqual(meta["texture_info"],{"width":64,"height":32,
-                    "scale":1,"uv":"bedrock_64x32"})
-    def test_hd_1280x640_generates_scale_twenty_without_resizing(self):
+                self.assertNotIn("texture_info",meta)
+    def test_hd_1280x640_passes_source_png_untouched_to_runtime(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)
             png=root/"HD.png"
@@ -72,8 +71,8 @@ class PackTests(unittest.TestCase):
             with ZipFile(out) as archive:
                 self.assertEqual(archive.read("cape.png"),png.read_bytes())
                 meta=json.loads(archive.read("cape.json"))
-                self.assertEqual(meta["texture_info"]["scale"],20)
-                self.assertEqual(meta["texture_info"]["height"],640)
+                self.assertNotIn("texture_info",meta)
+                self.assertEqual(meta["name"],"HD")
     def test_complete_persona_bundle_keeps_animated_resources_byte_exact(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)
@@ -113,21 +112,27 @@ class PackTests(unittest.TestCase):
                     "modules":[{"type":"persona_piece"}]}))
             with self.assertRaisesRegex(ValueError,"module uuid"):
                 module.create(None,root/"invalid.zip",persona_zip=native)
-    def test_reject_invalid_png_and_animated_spritesheet_not_cape_uv(self):
+    def test_simple_png_validation_defers_uv_and_decode_to_cosmetics(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)
             png=root/"input.png"
             png.write_bytes(b"not a png")
             with self.assertRaises(ValueError):
                 module.create(png,root/"bad.zip")
+            # Not a valid cape UV: Python merely archives the source.
+            # The Rust DLL checks/denies this image on startup.
             png.write_bytes(png_bytes(64,64))
-            with self.assertRaisesRegex(ValueError,"cape UV"):
-                module.create(png,root/"bad.zip")
+            result=module.create(png,root/"archived.zip")
+            with ZipFile(result) as archive:
+                self.assertEqual(archive.read("cape.png"),png.read_bytes())
+            # Even broken PNG internals are rejected by Cosmetics' decoder,
+            # never silently rewritten or 'fixed' by Python.
             bad=bytearray(png_bytes())
             bad[-5] ^= 0x08
             png.write_bytes(bad)
-            with self.assertRaisesRegex(ValueError,"CRC"):
-                module.create(png,root/"bad.zip")
+            result=module.create(png,root/"unchecked.zip")
+            with ZipFile(result) as archive:
+                self.assertEqual(archive.read("cape.png"),bytes(bad))
     def test_invalid_rarity_and_dates_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)

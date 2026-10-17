@@ -18,31 +18,13 @@ const MAX_IMAGE:usize=8*1024*1024;
 const MAX_MANIFEST:usize=64*1024;
 const MAX_NATIVE:usize=64*1024*1024;
 
-#[derive(Debug,Deserialize)]
-struct TextureInfo {
-    width:u32,
-    height:u32,
-    scale:u32,
-    uv:String,
-}
-fn validate_texture_info(info:Option<&TextureInfo>,dimensions:Option<(u32,u32)>)->Result<(),String>{
-    let Some(info)=info else {return Ok(());};
-    let Some((width,height))=dimensions else {
-        return Err("texture_info requires a PNG texture".into());
-    };
-    if info.uv!="bedrock_64x32" || width%64!=0 || height%32!=0
-        || width/64!=height/32 || info.width!=width || info.height!=height
-        || info.scale!=width/64 {
-        return Err(format!("texture_info does not match PNG {width}x{height}"));
-    }
-    Ok(())
-}
+// Resolution and UV are inferred by validate_png() at startup.
+// Legacy texture_info JSON keys are ignored by serde, preserving old ZIPs.
 #[derive(Debug,Default,Deserialize)]
 struct CapeManifest {
     #[serde(default)] name:String,
     #[serde(default)] author:String,
     #[serde(default)] id:Option<String>,
-    #[serde(default)] texture_info:Option<TextureInfo>,
     #[serde(default)] rarity:Option<String>,
     #[serde(default,rename="startDate",alias="start_date")] start_date:Option<String>,
 }
@@ -218,7 +200,6 @@ struct PackCape {
     #[serde(default)] author: Option<String>,
     #[serde(default)] uuid: Option<String>, // Optional explicit item UUID
     #[serde(default)] texture: Option<String>,
-    #[serde(default)] texture_info:Option<TextureInfo>,
     #[serde(default)] persona_zip: Option<String>,
     #[serde(default)] rarity:Option<String>,
     #[serde(default,rename="startDate",alias="start_date")] start_date:Option<String>,
@@ -444,7 +425,7 @@ impl Registry {
                 let native=optional_file(&mut archive,persona,MAX_NATIVE)?;
                 let prepared=Self::prepare_cape(item_id,cape.name,author,png,native,
                     &pack.version,version,cape.rarity.as_deref(),
-                    cape.start_date.as_deref(),cape.texture_info.as_ref())?;
+                    cape.start_date.as_deref())?;
                 for (resource,_) in &prepared.assets {
                     if !resources.insert(resource.clone()){
                         return Err("duplicate cape resource UUID".into());
@@ -487,14 +468,14 @@ impl Registry {
             }
             let entry=Self::prepare_cape(item_id,name.clone(),&author,png,native,
                 "1.0.0",[1,0,0],cape_json.rarity.as_deref(),
-                cape_json.start_date.as_deref(),cape_json.texture_info.as_ref())?;
+                cape_json.start_date.as_deref())?;
             Ok((name,vec![entry]))
         }
     }
 
     fn prepare_cape(item_id:String,name:String,author:&str,png:Option<Vec<u8>>,
         original:Option<Vec<u8>>,version_text:&str,version:[u32;3],
-        rarity:Option<&str>,start_date:Option<&str>,texture_info:Option<&TextureInfo>)
+        rarity:Option<&str>,start_date:Option<&str>)
         ->Result<PreparedCape,String>{
         if !name_ok(&name)||!name_ok(author){return Err("invalid cape name or author".into());}
         let rarity=normalized_rarity(rarity)?;
@@ -503,7 +484,6 @@ impl Registry {
         }
         let decoded=png.as_ref().map(|data|validate_png(data)).transpose()?;
         let dimensions=decoded.as_ref().map(|img|img.dimensions());
-        validate_texture_info(texture_info,dimensions)?;
         let native=original.is_some();
         if !native {
             let (w,h)=dimensions.ok_or("PNG-only cape needs a texture")?;
@@ -857,7 +837,7 @@ mod tests{
             .write_to(&mut modified,ImageFormat::Png).unwrap();
         let make=|image:Vec<u8>|Registry::prepare_cape(
             id.clone(),"Local Cape".to_owned(),"Player",Some(image),None,
-            "1.0.0",[1,0,0],None,None,None).unwrap();
+            "1.0.0",[1,0,0],None,None).unwrap();
         let a=make(png.clone());
         let b=make(modified.into_inner());
         let again=make(png);
@@ -955,14 +935,6 @@ mod tests{
                 line.contains(&format!("texture={w}x{h}"))));
             let _=fs::remove_dir_all(root);
         }
-    }
-    #[test] fn generated_texture_metadata_matches_decoded_hd_cape(){
-        let expected=TextureInfo{width:1280,height:640,scale:20,uv:"bedrock_64x32".into()};
-        assert!(validate_texture_info(Some(&expected),Some((1280,640))).is_ok());
-        let bad=TextureInfo{scale:1,..expected};
-        assert!(validate_texture_info(Some(&bad),Some((1280,640))).is_err());
-        assert!(validate_texture_info(Some(&bad),None).is_err());
-        assert!(validate_texture_info(None,Some((64,32))).is_ok());
     }
     #[test] fn non_cape_aspect_ratio_is_rejected_with_diagnostic(){
         let root=std::env::temp_dir().join(format!("cosmetics_wrong_uv_{}",std::process::id()));

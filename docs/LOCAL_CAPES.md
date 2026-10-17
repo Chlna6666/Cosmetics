@@ -13,27 +13,25 @@ Cosmetics 目前在游戏启动时通过 Rust `persona_pack` 从普通 PNG 生�
 py scripts/pack_cape.py cape1280x640.png --name "高清披风" --author "作者" --rarity rare --out "capes/高清披风.zip"
 ```
 
-脚本会校验 PNG 的结构和 CRC、`64×32 × 整数倍率` 的标准 UV，
-并自动写入 `cape.json`：
+**Python 不负责高清转换、纹理放大或生成 UV/分辨率 JSON。**
+它只是检查文件签名与大小，随后把输入的 PNG 字节原样放进 ZIP。
+`cape.json` 仅保存名称、作者等商品信息：
 
 ```json
 {
   "name": "高清披风",
   "author": "作者",
-  "rarity": "rare",
-  "texture_info": {
-    "width": 1280,
-    "height": 640,
-    "scale": 20,
-    "uv": "bedrock_64x32"
-  }
+  "rarity": "rare"
 }
 ```
 
-可接受 `64×32`、`128×64`、`256×128`、`512×256`、`1280×640`、
-最高 `2048×1024` 等等比例 PNG（PNG 文件最大 8 MiB）。
-Rust 加载器还会独立解码图像并核对 JSON 所声明的尺寸；
-若尺寸不匹配会拒绝整包，不能以不一致的 UV 配置继续渲染。
+**Cosmetics DLL 才负责** 解码原图、验证完整 PNG 与 `64×32 × 整数倍率`
+的 UV、推导贴图尺寸、生成缩略图，并构造 `*.meta.json`、
+加密 Persona 资源索引和最终 `personabinary.zip`。
+支持的比例包括 `64×32`、`128×64`、`256×128`、
+`512×256`、`1280×640` 和最高 `2048×1024`（PNG 限制 8 MiB）。
+如果输入不符合游戏披风格式，Python 可能仍然打包成功，
+但 Cosmetics 会在游戏启动时拒绝加载并写出诊断信息。
 
 ### 已有动画 Persona ZIP：保持全部内层资源
 
@@ -72,7 +70,7 @@ py scripts/pack_capes.py MyCapes --name "我的披风合集" --author "Player" -
 ```
 
 生成的 `MyCapes/pack.json` 采用现有 `format_version: 1`（兼容旧版 Cosmetics），
-每件静态贴图都自动生成 `texture_info`；`uuid` 会保存并在后续重建复用。
+原始贴图字节不会改变，Python 不写 `texture_info`；Cosmetics 自行识别高清贴图。`uuid` 会保存并在后续重建复用。
 不要删除持久化的 `pack.json`。当图片改变时，当前 Rust 版也会根据
 最终 Persona 实际内容改变下载 URL，而商品 UUID 保持稳定。
 

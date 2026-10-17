@@ -3,11 +3,9 @@
 This validates author input; native Persona archives are preserved, never signed
 or modified. Rendering of animation inside a Persona bundle is game-dependent.
 """
-import binascii
 import json
 from pathlib import Path
 import re
-import struct
 import uuid
 from zipfile import ZipFile, BadZipFile
 
@@ -20,54 +18,15 @@ ALLOWED_RARITIES = {"common", "uncommon", "rare", "epic", "legendary"}
 
 
 def check_png(data):
-    """Check PNG structure/CRCs and Bedrock cape UV dimensions.
+    """Only verify the file size and PNG signature before archiving.
 
-    Does not enlarge a 64x32 image: HD capes retain their source pixels.
+    The Cosmetics Rust DLL is the sole authority for PNG decoding, UV
+    dimensions, high-resolution scale and Persona metadata generation.
     """
+    if not isinstance(data, bytes) or not data.startswith(PNG_SIGNATURE):
+        raise ValueError("input is not a PNG image")
     if len(data) > MAX_PNG:
         raise ValueError("PNG exceeds 8 MiB")
-    if len(data) < 57 or not data.startswith(PNG_SIGNATURE):
-        raise ValueError("input is not a complete PNG")
-    cursor = len(PNG_SIGNATURE)
-    dimensions = None
-    found_data = False
-    end = False
-    while cursor + 12 <= len(data):
-        size = struct.unpack_from(">I", data, cursor)[0]
-        tag = data[cursor + 4:cursor + 8]
-        endpos = cursor + 12 + size
-        if endpos > len(data):
-            raise ValueError("truncated PNG chunk")
-        content = data[cursor + 8:cursor + 8 + size]
-        crc = struct.unpack_from(">I", data, cursor + 8 + size)[0]
-        if binascii.crc32(tag + content) & 0xffffffff != crc:
-            raise ValueError("PNG chunk CRC mismatch")
-        if dimensions is None:
-            if tag != b"IHDR" or size != 13:
-                raise ValueError("missing PNG IHDR")
-            width, height, depth, color, compress, flt, interlace = struct.unpack(">IIBBBBB", content)
-            if (depth not in (1, 2, 4, 8, 16) or color not in (0, 2, 3, 4, 6)
-                or compress != 0 or flt != 0 or interlace not in (0, 1)):
-                raise ValueError("unsupported PNG encoding")
-            if (width < 64 or height < 32 or width > 2048 or height > 2048
-                    or width % 64 or height % 32 or width // 64 != height // 32):
-                raise ValueError(f"invalid cape UV dimensions {width}x{height}; expected 64x32 multiplied by 1..32")
-            dimensions = (width, height)
-        if tag == b"IDAT":
-            found_data = True
-        if tag == b"IEND":
-            if size or endpos != len(data):
-                raise ValueError("invalid PNG IEND")
-            end = True
-            break
-        cursor = endpos
-    if not end or not found_data:
-        raise ValueError("PNG missing IDAT/IEND")
-    return dimensions
-
-
-def texture_info(width, height):
-    return {"width": width, "height": height, "scale": width // 64, "uv": "bedrock_64x32"}
 
 
 def valid_name(text, label):
