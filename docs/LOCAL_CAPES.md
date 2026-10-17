@@ -347,4 +347,8 @@ The source and reference have different security contexts: these resources are a
 
 ### 资源缓存失效
 
-Persona 下载资源的 UUID 现在取自稳定商品 UUID、包版本、实际 Persona ZIP 内容以及缩略图的 SHA-256 指纹。更换 PNG、Persona ZIP 或打包格式时，`Contents[0].Id` 和 `/personabinary/<resource UUID>.zip` 自动变化，不会复用旧 405/旧 ZIP 响应缓存；商品 `id` 与 `packIdentity` 均保持不变。重新安装新 DLL 后需要完全退出并重新启动 Minecraft，才能重新读取新商品数据。
+Persona 下载资源的 UUID 取自稳定商品 UUID、包版本、实际 Persona ZIP 内容和缩略图的 SHA-256 指纹。更换 PNG、Persona ZIP 或打包格式时，`Contents[0].Id` 和下载 URL 自动变化。
+
+**重要（2026-10 高清缓存修复）**：对于 Cosmetics 现场生成的 PNG Persona，除下载 URL 外，现在还会按原始 PNG、披风名称、作者设置的版本及生成器版本推导稳定的三段式 `packIdentity.version`。该版本同时写入 Persona 内部 `manifest.header.version`、模块版本、更衣室商品和 `GetPublishedItem`；同样的输入得到相同版本，不同 PNG 不再一直沿用 `1.0.0`。固定商品 ID、包 UUID 不变。**已有原生 Persona ZIP 不改动版本**，保持原始发布者数据。
+
+日志 `ITEM_REGISTERED` 会输出 `pack_version`，用于核对客户端缓存版本。当前 Minecraft 缓存命中规则不是公开的，以上属于避免资源标识不一致的保守措施；并不证明 Minecraft 一定支持 1280×640 的 Persona 原图。完全退出游戏并重新启动后再复测，**若日志没有任何 `LOCAL_CATALOG_SYNTHETIC`、`LOCAL_ASSET_REQUEST`，则这段日志只能证明商品呈现，不能据此断言游戏收到了新版 ZIP**。

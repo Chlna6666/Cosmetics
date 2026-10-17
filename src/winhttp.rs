@@ -238,8 +238,9 @@ unsafe extern "system" fn worker(module: H) -> u32 {
         let name=item.get("title").and_then(|v|v.as_str()).unwrap_or("?");
         let author=item.get("creatorName").and_then(|v|v.as_str()).unwrap_or("?");
         let pack_id=item.pointer("/packIdentity/0/uuid").and_then(|v|v.as_str()).unwrap_or("?");
-        logger(&format!("local_capes ITEM_REGISTERED index={} name={} author={} item_uuid={} pack_uuid={} game_loaded=UNVERIFIED",
-            index+1,name,author,id,pack_id));
+        let pack_version=item.pointer("/packIdentity/0/version").and_then(|v|v.as_str()).unwrap_or("?");
+        logger(&format!("local_capes ITEM_REGISTERED index={} name={} author={} item_uuid={} pack_uuid={} pack_version={} game_loaded=UNVERIFIED",
+            index+1,name,author,id,pack_id,pack_version));
     }
     logger(&format!("session_start build_version={} module=WinHTTP config_source={config_source} fail_open=true",
         env!("CARGO_PKG_VERSION")));
