@@ -114,7 +114,7 @@ struct NativeIdentity {uuid:String,version:String}
 fn is_binary_bundle(bytes:&[u8])->Result<bool,String>{
     let zip=ZipArchive::new(Cursor::new(bytes))
         .map_err(|e|format!("persona ZIP invalid: {e}"))?;
-    Ok(zip.file_names().any(|name|name=="ppack0.zip"))
+    Ok(zip.file_names().flatten().any(|name|name=="ppack0.zip"))
 }
 fn validate_native(bytes:&[u8])->Result<NativeIdentity,String>{
     // Native Persona data can be a direct pack or a catalog personabinary
@@ -615,7 +615,7 @@ mod tests{
         let mut pack=Vec::new();
         outer.by_name("ppack0.zip").unwrap().read_to_end(&mut pack).unwrap();
         let mut zip=ZipArchive::new(Cursor::new(pack)).unwrap();
-        assert!(zip.file_names().any(|name|name.ends_with("_cape.png")));
+        assert!(zip.file_names().flatten().any(|name|name.ends_with("_cape.png")));
         let manifest:Value=serde_json::from_reader(zip.by_name("manifest.json").unwrap()).unwrap();
         assert_eq!(manifest["header"]["uuid"],reg.items[0]["packIdentity"][0]["uuid"]);
         assert_ne!(manifest["modules"][0]["uuid"],manifest["header"]["uuid"]);
@@ -631,7 +631,7 @@ mod tests{
         let mut archive=ZipArchive::new(Cursor::new(nested)).unwrap();
         let manifest:Value=serde_json::from_reader(archive.by_name("manifest.json").unwrap()).unwrap();
         assert_eq!(manifest["format_version"],1);
-        assert!(archive.file_names().any(|path|path.ends_with("_cape.meta.json")));
+        assert!(archive.file_names().flatten().any(|path|path.ends_with("_cape.meta.json")));
         let mut index=Vec::new();
         archive.by_name("contents.json").unwrap().read_to_end(&mut index).unwrap();
         assert_eq!(&index[4..8],&2614082044u32.to_le_bytes());
@@ -884,7 +884,7 @@ mod tests{
             let mut nested=Vec::new();
             outer.by_name("ppack0.zip").unwrap().read_to_end(&mut nested).unwrap();
             let mut inner=ZipArchive::new(Cursor::new(nested)).unwrap();
-            let texture=inner.file_names().find(|path|path.ends_with("_cape.png"))
+            let texture=inner.file_names().flatten().find(|path|path.ends_with("_cape.png"))
                 .unwrap().to_string();
             let mut encrypted=Vec::new();
             inner.by_name(&texture).unwrap().read_to_end(&mut encrypted).unwrap();
