@@ -2,21 +2,21 @@
 
 ## 当前版本：高清披风与动画 Persona 打包（2026-10）
 
-Cosmetics 目前在游戏启动时通过 Rust \`persona_pack\` 从普通 PNG 生成
-\`personabinary.zip → ppack0.zip → manifest.json / *.meta.json / contents.json / signatures.json\`。
+Cosmetics 目前在游戏启动时通过 Rust `persona_pack` 从普通 PNG 生成
+`personabinary.zip → ppack0.zip → manifest.json / *.meta.json / contents.json / signatures.json`。
 **Python 脚本输出的是 Cosmetics 安装用的外层 ZIP**，因此无需在 Python
-环境安装加密依赖或手工书写 Persona 的 \`*.meta.json\`。
+环境安装加密依赖或手工书写 Persona 的 `*.meta.json`。
 
 ### 高清静态披风（支持原像素，不做低清缩放）
 
-\`\`\`powershell
+```powershell
 py scripts/pack_cape.py cape1280x640.png --name "高清披风" --author "作者" --rarity rare --out "capes/高清披风.zip"
-\`\`\`
+```
 
-脚本会校验 PNG 的结构和 CRC、\`64×32 × 整数倍率\` 的标准 UV，
-并自动写入 \`cape.json\`：
+脚本会校验 PNG 的结构和 CRC、`64×32 × 整数倍率` 的标准 UV，
+并自动写入 `cape.json`：
 
-\`\`\`json
+```json
 {
   "name": "高清披风",
   "author": "作者",
@@ -28,24 +28,24 @@ py scripts/pack_cape.py cape1280x640.png --name "高清披风" --author "作者"
     "uv": "bedrock_64x32"
   }
 }
-\`\`\`
+```
 
-可接受 \`64×32\`、\`128×64\`、\`256×128\`、\`512×256\`、\`1280×640\`、
-最高 \`2048×1024\` 等等比例 PNG（PNG 文件最大 8 MiB）。
+可接受 `64×32`、`128×64`、`256×128`、`512×256`、`1280×640`、
+最高 `2048×1024` 等等比例 PNG（PNG 文件最大 8 MiB）。
 Rust 加载器还会独立解码图像并核对 JSON 所声明的尺寸；
 若尺寸不匹配会拒绝整包，不能以不一致的 UV 配置继续渲染。
 
 ### 已有动画 Persona ZIP：保持全部内层资源
 
-\`\`\`powershell
+```powershell
 py scripts/pack_cape.py --persona-zip "我的动画.persona.zip" --name "动画披风" --out "capes/动画披风.zip"
-\`\`\`
+```
 
-\`--persona-zip\` 支持两种来源：
+`--persona-zip` 支持两种来源：
 
-1. 原生裸 Persona ZIP：根目录包含 \`manifest.json\`、类型为
-   \`persona_piece\` 的模块；Cosmetics 运行时补外层 \`ppack0.zip\`。
-2. 完整的 catalog personabinary ZIP：根目录为 \`ppack0.zip\`，
+1. 原生裸 Persona ZIP：根目录包含 `manifest.json`、类型为
+   `persona_piece` 的模块；Cosmetics 运行时补外层 `ppack0.zip`。
+2. 完整的 catalog personabinary ZIP：根目录为 `ppack0.zip`，
    内层包含 Persona manifest；Cosmetics 运行时直接使用完整原始字节。
 
 打包器**不拆帧、不重新加密、不覆盖动画 JSON、贴图、骨骼和其他资源**，
@@ -53,27 +53,27 @@ py scripts/pack_cape.py --persona-zip "我的动画.persona.zip" --name "动画�
 这不保证游戏一定识别该第三方动画内容；只保证无损保留它。
 
 **不要把帧图拼成 64×64、64×96 等竖向图后伪装成静态披风**。
-标准 Persona 披风的 \`texture_sources\` 不能仅依靠这样的图自动播放帧。
-CapeForge 等资源包使用的 \`.mcpack\` 动画控制器是另一条渲染链路；
+标准 Persona 披风的 `texture_sources` 不能仅依靠这样的图自动播放帧。
+CapeForge 等资源包使用的 `.mcpack` 动画控制器是另一条渲染链路；
 此 Python 命令不会自动把资源包动画转换为 Persona 商品动画。
 
 ### 批量打包
 
-\`\`\`text
+```text
 MyCapes/
   red.png
   hires.png
   moving.persona.zip       # 可选：完整原生/封装 Persona
   moving.png               # 可选：仅用于缩略图
-\`\`\`
+```
 
-\`\`\`powershell
+```powershell
 py scripts/pack_capes.py MyCapes --name "我的披风合集" --author "Player" --out "capes/MyCapes.zip"
-\`\`\`
+```
 
-生成的 \`MyCapes/pack.json\` 采用现有 \`format_version: 1\`（兼容旧版 Cosmetics），
-每件静态贴图都自动生成 \`texture_info\`；\`uuid\` 会保存并在后续重建复用。
-不要删除持久化的 \`pack.json\`。当图片改变时，当前 Rust 版也会根据
+生成的 `MyCapes/pack.json` 采用现有 `format_version: 1`（兼容旧版 Cosmetics），
+每件静态贴图都自动生成 `texture_info`；`uuid` 会保存并在后续重建复用。
+不要删除持久化的 `pack.json`。当图片改变时，当前 Rust 版也会根据
 最终 Persona 实际内容改变下载 URL，而商品 UUID 保持稳定。
 
 ---
