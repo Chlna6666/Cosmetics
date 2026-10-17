@@ -168,6 +168,8 @@ struct AsyncCapture {
 }
 struct Replay {
     bytes: Vec<u8>,
+    // HEAD advertises the GET representation's length but sends no body.
+    head_content_length: Option<usize>,
     position: usize,
     complete: bool,
     replaced: bool,
@@ -518,7 +520,7 @@ unsafe fn catalog_fast_response(h:H)->bool {
             let registered={
                 let mut state=tables().lock().unwrap_or_else(|e|e.into_inner());
                 if let Some(r)=state.requests.get_mut(&state_key(h)){
-                    r.replay=Some(Replay{bytes,position:0,complete:true,replaced:true,
+                    r.replay=Some(Replay{bytes,position:0,head_content_length:None,complete:true,replaced:true,
                         catalog:true,zip:false,png:false,strip_encoding:true,status:200,delivery_logged:false});
                     true
                 }else{false}
@@ -544,6 +546,21 @@ unsafe fn catalog_fast_response(h:H)->bool {
             false
         }
     }
+}
+// A HEAD request is a representation metadata probe, not a download.
+// Content-Length describes the GET payload, even with zero HEAD body bytes.
+fn virtual_asset_replay(method:&str,data:Vec<u8>,status:u32,png:bool)->Replay {
+    let head=method.eq_ignore_ascii_case("HEAD");
+    let declared=head.then_some(data.len());
+    Replay{
+        bytes:if head{Vec::new()}else{data},position:0,
+        head_content_length:declared,complete:true,replaced:true,
+        catalog:false,zip:!png,png,strip_encoding:false,status,
+        delivery_logged:false,
+    }
+}
+fn virtual_asset_method_allowed(method:&str)->bool {
+    method.eq_ignore_ascii_case("GET")||method.eq_ignore_ascii_case("HEAD")
 }
 unsafe extern "system" fn on_send(
     h:H,headers:*const u16,header_len:u32,optional:H,optional_len:u32,total_len:u32,ctx:usize
@@ -585,8 +602,8 @@ unsafe extern "system" fn on_send(
     };
     if let Some((path,method,async_request))=virtual_resource {
         let mut image=false;
-        let (data,status)=if !method.eq_ignore_ascii_case("GET") {
-            logger("local virtual asset refused non-GET request");
+        let (data,status)=if !virtual_asset_method_allowed(&method) {
+            logger(&format!("local virtual asset refused unsupported method {method}"));
             (Vec::new(),405)
         } else if let Some((bytes,kind))=local_capes::asset(&path) {
             image=kind==local_capes::AssetType::Png;
@@ -611,13 +628,16 @@ unsafe extern "system" fn on_send(
             let mut state=tables().lock().unwrap_or_else(|e|e.into_inner());
             if let Some(r)=state.requests.get_mut(&state_key(h)) {
                 r.synthetic=true;r.status=status;r.callback_context=ctx;
-                r.replay=Some(Replay{bytes:data,position:0,complete:true,replaced:true,
-                    catalog:false,zip:!image,png:image,strip_encoding:false,status,delivery_logged:false});
+                r.replay=Some(virtual_asset_replay(&method,data,status,image));
             }
         }
-        logger(&format!("LOCAL_ASSET_RESPONSE_READY status={status} bytes={} async={async_request} (game acceptance unverified)",
-            tables().lock().unwrap_or_else(|e|e.into_inner()).requests.get(&state_key(h))
-                .and_then(|r|r.replay.as_ref()).map_or(0,|r|r.bytes.len())));
+        let (body_bytes,declared_bytes)={
+            let state=tables().lock().unwrap_or_else(|e|e.into_inner());
+            state.requests.get(&state_key(h)).and_then(|r|r.replay.as_ref())
+                .map_or((0,0),|rep|(rep.bytes.len(),
+                    rep.head_content_length.unwrap_or(rep.bytes.len())))
+        };
+        logger(&format!("LOCAL_ASSET_RESPONSE_READY method={method} status={status} bytes={body_bytes} content_length={declared_bytes} async={async_request} (game acceptance unverified)"));
         if async_request {notify_game(h,ctx,STATUS_SEND_COMPLETE,ptr::null_mut(),0);}
         return 1;
     }
@@ -646,7 +666,7 @@ unsafe extern "system" fn on_send(
                     req.catalog_checked=true;
                     req.status=200;
                     req.callback_context=ctx;
-                    req.replay=Some(Replay{bytes,position:0,complete:true,replaced:true,
+                    req.replay=Some(Replay{bytes,position:0,head_content_length:None,complete:true,replaced:true,
                         catalog:true,zip:false,png:false,strip_encoding:true,status:200,
                         delivery_logged:false});
                     true
@@ -833,7 +853,7 @@ unsafe fn finish_async(h:H,completed:bool) {
         }
     }
     let mut replay=Replay{
-        bytes:original,position:0,complete:completed,replaced:false,catalog:false,zip:false,png:false,
+        bytes:original,position:0,head_content_length:None,complete:completed,replaced:false,catalog:false,zip:false,png:false,
         strip_encoding:false,status:200,delivery_logged:false
     };
     if completed {
@@ -1005,7 +1025,7 @@ unsafe extern "system" fn on_receive(h:H,reserved:H)->B {
             debug_log(&format!("request #{request_id}: UPSTREAM_JSON unavailable (decode failed)"));
         }
     }
-    let mut replay=Replay {bytes:raw,position:0,complete:completed,replaced:false,
+    let mut replay=Replay {bytes:raw,position:0,head_content_length:None,complete:completed,replaced:false,
         catalog:false,zip:false,png:false,strip_encoding:false,status:200,delivery_logged:false};
     if completed && replay.bytes.len()<=limit {
         match codec::rewrite(&rt.root,&rule,&body,&replay.bytes,encoding,limit) {
@@ -1104,21 +1124,29 @@ unsafe fn synthetic_header(query:u32,buffer:H,length:*mut u32,text:&str)->B {
 // Return headers for synthetic/rewritten WinHTTP replies without consulting
 // the original handle. Synthetic requests were never sent to WinHTTP and a
 // fallback query would report incorrect handle state, leaving the GUI loading.
+fn synthetic_status_text(status:u32)->&'static str {
+    match status {
+        200=>"OK",
+        404=>"Not Found",
+        405=>"Method Not Allowed",
+        _=>"Unknown",
+    }
+}
 fn synthetic_header_value(query:u32,custom:Option<&str>,size:usize,status:u32,png:bool,zip:bool)->Option<String>{
     let key=query&0xffff;
     let mime=if png {"image/png"}else if zip {"application/zip"}else{"application/json"};
     match key {
         QUERY_CONTENT_LENGTH=>Some(size.to_string()),
         QUERY_STATUS_CODE=>Some(status.to_string()),
-        QUERY_STATUS_TEXT=>Some(if status==200{"OK"}else{"Not Found"}.into()),
+        QUERY_STATUS_TEXT=>Some(synthetic_status_text(status).into()),
         QUERY_VERSION=>Some("HTTP/1.1".into()),
         QUERY_CONTENT_TYPE=>Some(mime.into()),
         QUERY_RAW_HEADERS_CRLF=>Some(format!(
             "HTTP/1.1 {status} {}\r\nContent-Type: {mime}\r\nContent-Length: {size}\r\nCache-Control: no-store\r\n\r\n",
-            if status==200{"OK"}else{"Not Found"})),
+            synthetic_status_text(status))),
         QUERY_RAW_HEADERS=>Some(format!(
             "HTTP/1.1 {status} {}\0Content-Type: {mime}\0Content-Length: {size}\0Cache-Control: no-store\0\0",
-            if status==200{"OK"}else{"Not Found"})),
+            synthetic_status_text(status))),
         QUERY_CUSTOM=>match custom.unwrap_or_default().to_ascii_lowercase().as_str(){
             "content-type"=>Some(mime.into()),
             "content-length"=>Some(size.to_string()),
@@ -1136,7 +1164,7 @@ unsafe extern "system" fn on_headers(
         state.requests.get(&state_key(h))
             .and_then(|request|request.replay.as_ref()
                 .filter(|rep|rep.replaced)
-                .map(|rep|(rep.bytes.len(),rep.status,rep.png,rep.zip,rep.catalog,
+                .map(|rep|(rep.head_content_length.unwrap_or(rep.bytes.len()),rep.status,rep.png,rep.zip,rep.catalog,
                     rep.strip_encoding,request.synthetic)))
     };
     if let Some((size,status,png,zip,_catalog,strip_encoding,synthetic))=replay {
@@ -1210,6 +1238,46 @@ mod isolation_tests {
         assert_eq!(synthetic_header_value(QUERY_STATUS_TEXT,None,5,200,false,false),
             Some("OK".into()));
         assert_eq!(synthetic_header_value(QUERY_CUSTOM,Some("Authorization"),5,200,false,false),None);
+    }
+    #[test]
+    fn persona_zip_head_returns_get_metadata_with_no_body() {
+        let zipped=b"virtual zip data".to_vec();
+        let head=virtual_asset_replay("HEAD",zipped.clone(),200,false);
+        assert!(head.bytes.is_empty(),"HEAD must not return a ZIP body");
+        assert_eq!(head.head_content_length,Some(zipped.len()));
+        assert_eq!(head.status,200);
+        assert!(head.zip);
+        assert!(virtual_asset_method_allowed("HEAD"));
+        assert!(virtual_asset_method_allowed("GET"));
+        assert!(virtual_asset_method_allowed("head"));
+        assert!(!virtual_asset_method_allowed("POST"));
+        assert_eq!(synthetic_header_value(QUERY_CONTENT_LENGTH,None,
+            head.head_content_length.unwrap(),head.status,head.png,head.zip),
+            Some(zipped.len().to_string()));
+        assert_eq!(synthetic_header_value(QUERY_CONTENT_TYPE,None,
+            head.head_content_length.unwrap(),head.status,head.png,head.zip),
+            Some("application/zip".into()));
+        let get=virtual_asset_replay("GET",zipped.clone(),200,false);
+        assert_eq!(get.bytes,zipped);
+        assert_eq!(get.head_content_length,None);
+        assert_eq!(get.bytes.len(),head.head_content_length.unwrap());
+        let thumbnail=virtual_asset_replay("HEAD",vec![1,2,3],200,true);
+        assert!(thumbnail.bytes.is_empty());
+        assert!(thumbnail.png);
+        assert_eq!(thumbnail.head_content_length,Some(3));
+        assert_eq!(synthetic_header_value(QUERY_CONTENT_TYPE,None,3,200,true,false),
+            Some("image/png".into()));
+    }
+    #[test]
+    fn missing_resources_and_unsupported_methods_keep_correct_status_headers() {
+        let missing=virtual_asset_replay("HEAD",Vec::new(),404,false);
+        assert_eq!(missing.head_content_length,Some(0));
+        assert_eq!(synthetic_header_value(QUERY_STATUS_TEXT,None,0,404,false,true),
+            Some("Not Found".into()));
+        assert_eq!(synthetic_header_value(QUERY_STATUS_TEXT,None,0,405,false,true),
+            Some("Method Not Allowed".into()));
+        assert_eq!(synthetic_header_value(QUERY_RAW_HEADERS_CRLF,None,0,405,false,true)
+            .unwrap().lines().next().unwrap(),"HTTP/1.1 405 Method Not Allowed");
     }
     #[test]
     fn only_complete_known_local_catalog_requests_are_synthesized(){
