@@ -31,10 +31,16 @@ Try:
 
     py scripts/pack_cape.py your-cape.png --name "My Cape"
 
-PNG-only packs use an experimental, plaintext Persona resource format.
-**They may appear in the menu without actually being wearable.**
-A prebuilt persona.zip is forwarded without re-encryption or modification,
-but still subject to Minecraft validation. No Cosmos access is required.
+PNG-only packs are converted by the Rust DLL into a Persona binary bundle
+with ppack0.zip, generated cape *.meta.json, contents.json and signatures.json.
+Successful packaging is not a guarantee of game acceptance.
+A prebuilt persona.zip is preserved byte-for-byte (bundled once if bare).
+Its animation resources remain intact; that does not establish that the game
+will support any particular third-party animation. No Cosmos access is required.
+
+For HD PNGs, py scripts/pack_cape.py automatically writes texture_info in
+cape.json (e.g. 1280x640 = 20x UV scale). See docs/LOCAL_CAPES.md for
+the difference between Persona cape resources and animated .mcpack files.
 
 
 ## v0.1.12 — Multiple capes per ZIP and stable identities

@@ -3,6 +3,10 @@ import importlib.util
 import json
 from pathlib import Path
 import struct
+import zlib
+import binascii
+import io
+import uuid
 import tempfile
 import unittest
 from zipfile import ZipFile
@@ -11,9 +15,13 @@ spec=importlib.util.spec_from_file_location("pack_capes",Path(__file__).with_nam
 module=importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
-def png_header():
-    return (b"\x89PNG\r\n\x1a\n"+struct.pack(">I",13)+b"IHDR"
-            +struct.pack(">II",64,32)+b"\x08\x06\x00\x00\x00"+b"\x00\x00\x00\x00")
+def png_header(width=64,height=32):
+    def chunk(kind,raw):
+        return struct.pack(">I",len(raw))+kind+raw+struct.pack(">I",binascii.crc32(kind+raw)&0xffffffff)
+    return (b"\x89PNG\r\n\x1a\n"
+        +chunk(b"IHDR",struct.pack(">IIBBBBB",width,height,8,6,0,0,0))
+        +chunk(b"IDAT",zlib.compress((b"\x00"+b"\x22\x66\x88\xff"*width)*height))
+        +chunk(b"IEND",b""))
 
 class MultiCapePackTests(unittest.TestCase):
     def test_single_zip_holds_three_capes_with_permanent_ids(self):
@@ -66,6 +74,66 @@ class MultiCapePackTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 module.create(folder,Path(td)/"one.zip")
             self.assertEqual((folder/"pack.json").read_bytes(),manifest)
+
+    def test_high_resolution_metadata_and_existing_manual_rarity(self):
+        with tempfile.TemporaryDirectory() as td:
+            folder=Path(td)/"hires"
+            folder.mkdir()
+            (folder/"4k.png").write_bytes(png_header(1280,640))
+            destination=Path(td)/"collection.zip"
+            module.create(folder,destination,rarity="legendary")
+            meta=json.loads((folder/"pack.json").read_text())
+            self.assertEqual(meta["capes"][0]["texture_info"],
+                {"width":1280,"height":640,"scale":20,"uv":"bedrock_64x32"})
+            self.assertEqual(meta["capes"][0]["rarity"],"legendary")
+            persisted=meta["capes"][0]["uuid"]
+            module.create(folder,destination)
+            self.assertEqual(json.loads((folder/"pack.json").read_text())["capes"][0]["uuid"],persisted)
+    def test_native_animation_payload_is_preserved_and_static_preview_optional(self):
+        with tempfile.TemporaryDirectory() as td:
+            folder=Path(td)/"animated"
+            folder.mkdir()
+            pack=io.BytesIO()
+            with ZipFile(pack,"w") as archive:
+                archive.writestr("manifest.json",json.dumps({
+                    "format_version":1,
+                    "header":{"uuid":str(uuid.uuid4()),"version":[1,0,0]},
+                    "modules":[{"type":"persona_piece","uuid":str(uuid.uuid4())}]}))
+                archive.writestr("animation/frames.json",b'{"frames":3}')
+            outer=io.BytesIO()
+            with ZipFile(outer,"w") as archive:
+                archive.writestr("ppack0.zip",pack.getvalue())
+            original=outer.getvalue()
+            (folder/"foo.persona.zip").write_bytes(original)
+            target=Path(td)/"output.zip"
+            module.create(folder,target)
+            with ZipFile(target) as archive:
+                capes=json.loads(archive.read("pack.json"))["capes"]
+                self.assertEqual(len(capes),1)
+                self.assertNotIn("texture",capes[0])
+                self.assertEqual(archive.read("native/foo.zip"),original)
+            (folder/"foo.png").write_bytes(png_header(128,64))
+            module.create(folder,target)
+            with ZipFile(target) as archive:
+                capes=json.loads(archive.read("pack.json"))["capes"]
+                self.assertEqual(len(capes),1)
+                self.assertEqual(archive.read("native/foo.zip"),original)
+                self.assertEqual(capes[0]["texture_info"]["scale"],2)
+    def test_invalid_uv_does_not_replace_old_multi_zip(self):
+        with tempfile.TemporaryDirectory() as td:
+            folder=Path(td)/"source"
+            folder.mkdir()
+            file=folder/"ok.png"
+            file.write_bytes(png_header())
+            target=Path(td)/"output.zip"
+            module.create(folder,target)
+            original=target.read_bytes()
+            manifest=(folder/"pack.json").read_bytes()
+            file.write_bytes(png_header(64,64))
+            with self.assertRaisesRegex(ValueError,"cape UV"):
+                module.create(folder,target)
+            self.assertEqual(original,target.read_bytes())
+            self.assertEqual(manifest,(folder/"pack.json").read_bytes())
 
 if __name__=="__main__":
     unittest.main()

@@ -45,6 +45,7 @@ jobs:
           New-Item -ItemType Directory -Force "$out/scripts" | Out-Null
           Copy-Item "scripts/import_cosmos.py" "$out/scripts"
           Copy-Item "scripts/pack_cape.py" "$out/scripts"
+          Copy-Item "scripts/cape_pack_utils.py" "$out/scripts"
           Copy-Item "scripts/pack_capes.py" "$out/scripts"
           Copy-Item "docs/COSMOS_IMPORT.md" "$out/COSMOS_IMPORT.md"
           Copy-Item "docs/LOCAL_CAPES.md" "$out/LOCAL_CAPES.md"

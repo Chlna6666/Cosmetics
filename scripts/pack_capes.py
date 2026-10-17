@@ -1,33 +1,23 @@
 #!/usr/bin/env python3
-"""Package multiple author-created capes as one deterministic Cosmetics ZIP.
-
-Persistent pack.json is written ONCE in the source directory, including all UUIDs.
-Subsequent builds reuse the same ids. The game never calls uuid4 on startup.
-"""
+"""Bundle up to 64 local capes and persist UUIDs safely in pack.json (v1)."""
 import argparse
 import json
+import os
 from pathlib import Path
 import re
-import struct
+import sys
+import tempfile
 import uuid
 import zipfile
 
-PNG = b"\x89PNG\r\n\x1a\n"
-
-
-def check_png(data):
-    if len(data) < 33 or data[:8] != PNG or data[12:16] != b"IHDR":
-        raise ValueError("not a PNG image")
-    width, height = struct.unpack(">II", data[16:24])
-    if not 0 < width <= 2048 or not 0 < height <= 2048:
-        raise ValueError("PNG dimensions must be within 1..2048")
-    if len(data) > 8 * 1024 * 1024:
-        raise ValueError("PNG image must not exceed 8 MiB")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from cape_pack_utils import (check_png, texture_info, valid_name, validated_rarity,
+                             validated_start_date, validate_native)
 
 
 def validate_version(value):
     parts = value.split(".")
-    if len(parts) != 3 or any(not part.isdigit() or int(part) > 65535 for part in parts):
+    if len(parts) != 3 or any(not p.isascii() or not p.isdigit() or len(p) > 5 or int(p) > 65535 for p in parts):
         raise ValueError("version must be major.minor.patch, each part <= 65535")
     return value
 
@@ -37,133 +27,122 @@ def safe_key(value):
 
 
 def make_key(stem, used):
-    base = re.sub(r"[^a-zA-Z0-9_.-]", "_", stem).strip("._")
-    if not base:
-        base = "cape"
-    base = base[:54]
-    key = base
-    n = 2
+    base = re.sub(r"[^a-zA-Z0-9_.-]", "_", stem).strip("._")[:54] or "cape"
+    key, n = base, 2
     while key in used:
-        key = f"{base}_{n}"
-        n += 1
+        key, n = f"{base}_{n}", n + 1
     return key
 
 
-def create(source, destination=None, name=None, author=None, version=None):
+def create(source, destination=None, name=None, author=None, version=None, rarity=None):
     source = Path(source).resolve()
     if not source.is_dir():
         raise ValueError("source must be a folder of PNG cape images")
     textures = sorted(source.glob("*.png"), key=lambda p: p.name.casefold())
     natives = sorted(source.glob("*.persona.zip"), key=lambda p: p.name.casefold())
-    native_stems = {p.name[:-len(".persona.zip")]: p for p in natives}
-    stems = sorted({p.stem for p in textures}.union(native_stems),
-                   key=str.casefold)
-    if not stems or len(stems) > 64:
-        raise ValueError("cape folder must contain 1..64 PNG or .persona.zip entries")
     by_stem = {p.stem: p for p in textures}
+    native_stems = {p.name[:-len(".persona.zip")]: p for p in natives}
+    stems = sorted(set(by_stem).union(native_stems), key=str.casefold)
+    if not 1 <= len(stems) <= 64:
+        raise ValueError("cape folder must contain 1..64 PNG or .persona.zip entries")
+    if len({stem.casefold() for stem in stems}) != len(stems):
+        raise ValueError("cape filenames must be unique ignoring case")
+    for stem in stems:
+        if (not stem or len(stem.encode("utf-8")) > 140
+            or any(c in stem for c in ("/", "\\", ":")) or stem in (".", "..")):
+            raise ValueError(f"unsafe cape filename: {stem}")
     destination = Path(destination) if destination else Path("capes") / f"{source.name}.zip"
     dest_resolved = destination.resolve()
-    if dest_resolved == (source / "pack.json"):
-        raise ValueError("cannot overwrite source pack.json")
     manifest_file = source / "pack.json"
+    if dest_resolved == manifest_file:
+        raise ValueError("cannot overwrite source pack.json")
     if manifest_file.exists():
         manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
-        if manifest.get("format_version") != 1 or not manifest.get("id"):
+        if manifest.get("format_version") != 1:
             raise ValueError("existing pack.json is not Cosmetics pack format v1")
         uuid.UUID(manifest["id"])
     else:
-        manifest = {
-            "format_version": 1,
-            "id": str(uuid.uuid4()),  # created ONCE, persisted to pack.json
-            "name": name or source.name,
-            "author": author or "Player",
-            "version": "1.0.0",
-            "capes": []
-        }
-    if name:
-        manifest["name"] = name
-    if author:
-        manifest["author"] = author
-    if version:
-        manifest["version"] = validate_version(version)
-    validate_version(manifest.get("version", "1.0.0"))
-    previous = {
-        (entry.get("texture") or entry.get("persona_zip")): entry
-        for entry in manifest.get("capes", [])
-    }
-    cape_entries = []
-    paths = []
-    used = set()
+        manifest = {"format_version": 1, "id": str(uuid.uuid4()),
+                    "name": source.name, "author": "Player", "version": "1.0.0", "capes": []}
+    manifest["name"] = valid_name(name or manifest["name"], "pack name")
+    manifest["author"] = valid_name(author or manifest["author"], "pack author")
+    manifest["version"] = validate_version(version or manifest.get("version", "1.0.0"))
+    if rarity is not None:
+        validated_rarity(rarity)
+    previous = {}
+    for entry in manifest.get("capes", []):
+        for path in (entry.get("texture"), entry.get("persona_zip")):
+            if path:
+                previous[path] = entry
+    capes, paths, used = [], [], set()
     for stem in stems:
-        png = by_stem.get(stem)
-        native = native_stems.get(stem)
-        if png:
-            data = png.read_bytes()
-            check_png(data)
-        else:
-            data = None
-        original_zip = native.read_bytes() if native else None
-        if original_zip is not None:
-            if len(original_zip) > 64*1024*1024:
-                raise ValueError("Persona ZIP exceeds 64 MiB")
-            with zipfile.ZipFile(native) as z:
-                payload = json.loads(z.read("manifest.json"))
-                if not any(x.get("type") == "persona_piece"
-                           for x in payload.get("modules", [])):
-                    raise ValueError(f"no persona_piece module in {native}")
+        png, native = by_stem.get(stem), native_stems.get(stem)
+        img = png.read_bytes() if png else None
+        dimensions = check_png(img) if img is not None else None
+        original = validate_native(native) if native else None
         path_png = f"textures/{stem}.png" if png else None
         path_native = f"native/{stem}.zip" if native else None
-        key = path_png or path_native
-        last = previous.get(key) or {}
+        last = previous.get(path_png) or previous.get(path_native) or {}
         ident = last.get("id")
         if not ident or not safe_key(ident) or ident in used:
             ident = make_key(stem, used)
         used.add(ident)
-        item_uuid = last.get("uuid") or str(uuid.uuid4())
-        uuid.UUID(item_uuid)
-        item = {"id": ident, "uuid": item_uuid,
-                "name": last.get("name") or stem}
+        item_id = str(uuid.UUID(last["uuid"])) if last.get("uuid") else str(uuid.uuid4())
+        item = {"id": ident, "uuid": item_id,
+                "name": valid_name(last.get("name") or stem, "cape name")}
         if path_png:
             item["texture"] = path_png
-            paths.append((path_png, data))
+            item["texture_info"] = texture_info(*dimensions)
+            paths.append((path_png, img))
         if path_native:
             item["persona_zip"] = path_native
-            paths.append((path_native, original_zip))
+            paths.append((path_native, original))
         if last.get("author"):
-            item["author"] = last["author"]
-        cape_entries.append(item)
-    manifest["capes"] = cape_entries
-    # Limit upload size before generating anything. ZIP compressed size is also
-    # checked by the runtime.
-    if sum(len(data) for _, data in paths) > 128*1024*1024:
-        raise ValueError("uncompressed cape payload total exceeds 128 MiB")
+            item["author"] = valid_name(last["author"], "cape author")
+        if rarity is not None or last.get("rarity"):
+            item["rarity"] = validated_rarity(rarity or last["rarity"])
+        if last.get("startDate"):
+            item["startDate"] = validated_start_date(last["startDate"])
+        capes.append(item)
+    manifest["capes"] = capes
+    payload = json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
+    if len(payload.encode("utf-8")) > 64 * 1024:
+        raise ValueError("pack.json exceeds 64 KiB")
+    if sum(len(data) for _, data in paths) > 128 * 1024 * 1024:
+        raise ValueError("uncompressed cape payload exceeds 128 MiB")
     dest_resolved.parent.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(dest_resolved, "w", zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("pack.json", json.dumps(manifest, ensure_ascii=False, indent=2))
-        for path, data in paths:
-            archive.writestr(path, data)
-    # Persist only AFTER a valid ZIP is successfully written.
-    manifest_file.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
-                             encoding="utf-8")
-    print(f"Created {dest_resolved}, capes={len(cape_entries)} pack_id={manifest['id']}"
-          f" version={manifest['version']}")
-    print(f"Persistent IDs saved at: {manifest_file}")
-    print("On texture changes, increment --version 1.0.1 to refresh content URLs/cache.")
-    print("Plain PNG -> Persona format remains experimental and may not equip.")
+    # Keep previous output untouched if ZIP generation fails; atomic replacement.
+    with tempfile.NamedTemporaryFile(dir=dest_resolved.parent, suffix=".zip", delete=False) as temp:
+        temp_path = Path(temp.name)
+    try:
+        with zipfile.ZipFile(temp_path, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("pack.json", payload)
+            for path, data in paths:
+                archive.writestr(path, data)
+        if temp_path.stat().st_size > 64 * 1024 * 1024:
+            raise ValueError("outer cape ZIP exceeds 64 MiB")
+        os.replace(temp_path, dest_resolved)
+    finally:
+        temp_path.unlink(missing_ok=True)
+    # Persist only after a valid package is produced.
+    manifest_file.write_text(payload, encoding="utf-8")
+    print(f"Created {dest_resolved}, capes={len(capes)} pack_id={manifest['id']} version={manifest['version']}")
+    print(f"Persistent UUIDs: {manifest_file}")
+    print("Native animated Persona bundles are kept as-is. Plain PNGs become static Persona capes.")
     return dest_resolved
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Bundle many capes into one ZIP, with permanent UUIDs")
+    parser = argparse.ArgumentParser(description="Bundle PNG / native Persona capes with stable UUIDs")
     parser.add_argument("folder", help="Folder with *.png and optional *.persona.zip")
     parser.add_argument("--out", help="Destination ZIP; default capes/<foldername>.zip")
-    parser.add_argument("--name", help="Pack title")
+    parser.add_argument("--name", help="Pack name")
     parser.add_argument("--author", help="Pack author")
-    parser.add_argument("--version", help="Explicit version, bump when textures change")
+    parser.add_argument("--version", help="Version; content URLs also change automatically")
+    parser.add_argument("--rarity", choices=["common","uncommon","rare","epic","legendary"])
     args = parser.parse_args()
     try:
-        create(args.folder, args.out, args.name, args.author, args.version)
+        create(args.folder, args.out, args.name, args.author, args.version, args.rarity)
     except (ValueError, OSError, KeyError, zipfile.BadZipFile) as exc:
         parser.error(str(exc))
 
