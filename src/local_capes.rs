@@ -811,6 +811,28 @@ mod tests{
         assert_ne!(preview.get_pixel(31,8),&Rgba([220,30,40,255]),
             "neutral mannequin head stays above the back cape");
     }
+    #[test] fn high_resolution_rgba8_also_uses_standard_persona_texture(){
+        // RGBA8 alone does not guarantee that Minecraft's built-in Persona
+        // renderer will accept a 20x atlas. Test both input representations.
+        let mut source=RgbaImage::from_pixel(1280,640,Rgba([0,0,0,0]));
+        for y in 20..340 {
+            for x in 20..220{source.put_pixel(x,y,Rgba([21,151,230,255]));}
+        }
+        let mut encoded=Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(source)
+            .write_to(&mut encoded,ImageFormat::Png).unwrap();
+        let png=encoded.into_inner();
+        assert_eq!(png[25],6);
+        let decoded=validate_png(&png).unwrap();
+        assert_eq!(decoded.dimensions(),(1280,640));
+        let (payload,transcoded)=persona_texture_png(&png,&decoded).unwrap();
+        assert!(transcoded,"20x RGBA8 still requires Persona 64x32 compatibility");
+        assert_eq!(payload[25],6);
+        let tex=validate_png(&payload).unwrap();
+        assert_eq!(tex.dimensions(),(64,32));
+        assert_eq!(tex.get_pixel(4,4),&Rgba([21,151,230,255]));
+        assert_eq!(tex.get_pixel(13,4),&Rgba([0,0,0,0]));
+    }
     #[test] fn uv_compat_downsample_keeps_separate_faces_and_alpha(){
         let mut source=RgbaImage::from_pixel(128,64,Rgba([0,0,0,0]));
         for y in 2..34{
